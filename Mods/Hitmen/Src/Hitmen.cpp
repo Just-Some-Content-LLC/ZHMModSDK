@@ -23,6 +23,7 @@
 #include "Glacier/ZApplicationEngineWin32.h"
 #include "Glacier/ZEngineAppCommon.h"
 #include "Glacier/ZPlayerRegistry.h"
+#include "Glacier/ZActor.h"
 
 #include "BinaryStreamReader.h"
 #include "BinaryStreamWriter.h"
