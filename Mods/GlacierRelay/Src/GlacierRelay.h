@@ -10,8 +10,9 @@
 
 struct SGameUpdateEvent;
 
-// Glacier Relay native adapter, M1 stage 1: observe engine state, derive one semantic event,
-// publish it to a log-only sink. No hooks, no UI, no network, no writes to engine state.
+// Glacier Relay native adapter: observe engine state each frame, derive the mission lifecycle
+// edges (mission.playing, mission.stopped) and publish them through IRelaySink. No hooks, no UI,
+// no inbound network, no writes to engine state.
 class GlacierRelay : public IPluginInterface
 {
 public:

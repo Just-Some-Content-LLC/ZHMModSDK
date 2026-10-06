@@ -3,6 +3,7 @@
 #include <Windows.h>
 
 #include <random>
+#include <variant>
 
 #include <fmt/format.h>
 
@@ -44,13 +45,34 @@ std::string RelayAdapter::UtcNow()
 
 void RelayAdapter::Publish(const MissionPlayingEvent& p_Event)
 {
+    PublishEnvelope(
+        RelayEvents::k_MissionPlaying, RelayEvents::k_MissionPlayingSchemaVersion,
+        RelaySerialization::MissionScenePayloadJson(p_Event)
+    );
+}
+
+void RelayAdapter::Publish(const MissionStoppedEvent& p_Event)
+{
+    PublishEnvelope(
+        RelayEvents::k_MissionStopped, RelayEvents::k_MissionStoppedSchemaVersion,
+        RelaySerialization::MissionScenePayloadJson(p_Event)
+    );
+}
+
+void RelayAdapter::Publish(const MissionEvent& p_Event)
+{
+    std::visit([this](const auto& p_Concrete) { Publish(p_Concrete); }, p_Event);
+}
+
+void RelayAdapter::PublishEnvelope(const char* p_EventType, int p_SchemaVersion, std::string p_PayloadJson)
+{
     RelayEnvelope s_Envelope;
     s_Envelope.adapter_instance_id = m_InstanceId;
     s_Envelope.sequence = ++m_Sequence;
     s_Envelope.timestamp = m_Clock();
-    s_Envelope.event_type = RelayEvents::k_MissionPlaying;
-    s_Envelope.schema_version = RelayEvents::k_MissionPlayingSchemaVersion;
-    s_Envelope.payload_json = RelaySerialization::MissionPlayingPayload(p_Event);
+    s_Envelope.event_type = p_EventType;
+    s_Envelope.schema_version = p_SchemaVersion;
+    s_Envelope.payload_json = std::move(p_PayloadJson);
 
     PublishedEnvelope s_Published;
     s_Published.event_type = s_Envelope.event_type;

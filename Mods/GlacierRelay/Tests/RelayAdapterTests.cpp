@@ -32,17 +32,28 @@ void RunRelayAdapterTests()
         == "\"assembly:/_PRO/Scenes/Missions/Paris/_Scene_FashionShowHit_01.entity\"");
     CHECK(Json::Quote("caf\xc3\xa9") == "\"caf\xc3\xa9\""); // UTF-8 passes through
 
-    // Payload with and without the session id.
+    // Payload with and without the session id; the same serializer for both lifecycle events.
     MissionPlayingEvent s_Event;
     s_Event.scene_resource = "assembly:/paris.entity";
     s_Event.scene_type = "mission";
     s_Event.codename_hint = "Peacock";
-    CHECK(RelaySerialization::MissionPlayingPayload(s_Event)
+    CHECK(RelaySerialization::MissionScenePayloadJson(s_Event)
         == "{\"scene_resource\":\"assembly:/paris.entity\",\"scene_type\":\"mission\",\"codename_hint\":\"Peacock\"}");
     s_Event.game_session_id = "2516109819408417528-6f46ac15-6033-4821-9d65-5ed7659392bb";
-    CHECK(RelaySerialization::MissionPlayingPayload(s_Event)
+    CHECK(RelaySerialization::MissionScenePayloadJson(s_Event)
         == "{\"scene_resource\":\"assembly:/paris.entity\",\"scene_type\":\"mission\",\"codename_hint\":\"Peacock\","
            "\"game_session_id\":\"2516109819408417528-6f46ac15-6033-4821-9d65-5ed7659392bb\"}");
+
+    MissionStoppedEvent s_Stopped;
+    s_Stopped.scene_resource = "assembly:/paris.entity";
+    s_Stopped.scene_type = "mission";
+    s_Stopped.codename_hint = "Peacock";
+    CHECK(RelaySerialization::MissionScenePayloadJson(s_Stopped)
+        == "{\"scene_resource\":\"assembly:/paris.entity\",\"scene_type\":\"mission\",\"codename_hint\":\"Peacock\"}");
+
+    // An empty payload (observability lost on the fall frame) still serializes as a valid object.
+    CHECK(RelaySerialization::MissionScenePayloadJson(MissionStoppedEvent{})
+        == "{\"scene_resource\":\"\",\"scene_type\":\"\",\"codename_hint\":\"\"}");
 
     // Envelope, exact text.
     RelayEnvelope s_Envelope;
@@ -57,22 +68,34 @@ void RunRelayAdapterTests()
            "\"timestamp\":\"2026-10-06T20:34:34.787Z\",\"event_type\":\"mission.playing\",\"schema_version\":1,"
            "\"payload\":{\"k\":\"v\"}}");
 
-    // Adapter: sequence, instance id, injected clock, sink receives owned values only.
+    // Adapter: one sequence across both event types, instance id, injected clock, sink receives
+    // owned values only.
     auto s_Sink = std::make_unique<CapturingSink>();
     auto* s_SinkView = s_Sink.get();
     int s_Ticks = 0;
     RelayAdapter s_Adapter(std::move(s_Sink), "id-1", [&] { return fmt::format("t{}", ++s_Ticks); });
 
     s_Adapter.Publish(s_Event);
-    s_Adapter.Publish(s_Event);
-    CHECK(s_Adapter.PublishedCount() == 2);
-    CHECK(s_SinkView->Published.size() == 2);
+    s_Adapter.Publish(s_Stopped);
+    s_Adapter.Publish(MissionEvent{s_Event});   // through the observer's variant
+    s_Adapter.Publish(MissionEvent{s_Stopped});
+    CHECK(s_Adapter.PublishedCount() == 4);
+    CHECK(s_SinkView->Published.size() == 4);
     CHECK(s_SinkView->Published[0].sequence == 1);
     CHECK(s_SinkView->Published[1].sequence == 2);
+    CHECK(s_SinkView->Published[2].sequence == 3);
+    CHECK(s_SinkView->Published[3].sequence == 4);
     CHECK(s_SinkView->Published[0].event_type == "mission.playing");
-    CHECK(s_SinkView->Published[1].json.find("\"sequence\":2,\"timestamp\":\"t2\"") != std::string::npos);
+    CHECK(s_SinkView->Published[1].event_type == "mission.stopped");
+    CHECK(s_SinkView->Published[2].event_type == "mission.playing");
+    CHECK(s_SinkView->Published[3].event_type == "mission.stopped");
+    CHECK(s_SinkView->Published[1].json.find("\"sequence\":2,\"timestamp\":\"t2\",\"event_type\":\"mission.stopped\",\"schema_version\":1,") != std::string::npos);
     CHECK(s_SinkView->Published[1].json.find("\"adapter_instance_id\":\"id-1\"") != std::string::npos);
     CHECK(s_SinkView->Published[1].json.find('\n') == std::string::npos);
+    CHECK(s_SinkView->Published[1].json
+        == "{\"protocol_version\":1,\"adapter_instance_id\":\"id-1\",\"sequence\":2,\"timestamp\":\"t2\","
+           "\"event_type\":\"mission.stopped\",\"schema_version\":1,\"payload\":{\"scene_resource\":\"assembly:/paris.entity\","
+           "\"scene_type\":\"mission\",\"codename_hint\":\"Peacock\"}}");
 
     // Instance ids: UUID shape, version 4, distinct.
     const auto s_IdA = RelayAdapter::NewInstanceId();

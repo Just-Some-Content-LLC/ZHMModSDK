@@ -26,6 +26,7 @@ struct RelayEnvelope
 
 namespace RelaySerialization
 {
-    std::string MissionPlayingPayload(const MissionPlayingEvent& p_Event);
+    // Schema version 1 of both mission lifecycle payloads: the same four fields.
+    std::string MissionScenePayloadJson(const MissionScenePayload& p_Payload);
     std::string Envelope(const RelayEnvelope& p_Envelope);
 }

@@ -4,15 +4,15 @@
 
 #include "Json.h"
 
-std::string RelaySerialization::MissionPlayingPayload(const MissionPlayingEvent& p_Event)
+std::string RelaySerialization::MissionScenePayloadJson(const MissionScenePayload& p_Payload)
 {
     std::string s_Json = fmt::format(
         "{{\"scene_resource\":{},\"scene_type\":{},\"codename_hint\":{}",
-        Json::Quote(p_Event.scene_resource), Json::Quote(p_Event.scene_type), Json::Quote(p_Event.codename_hint)
+        Json::Quote(p_Payload.scene_resource), Json::Quote(p_Payload.scene_type), Json::Quote(p_Payload.codename_hint)
     );
 
-    if (p_Event.game_session_id)
-        s_Json += fmt::format(",\"game_session_id\":{}", Json::Quote(*p_Event.game_session_id));
+    if (p_Payload.game_session_id)
+        s_Json += fmt::format(",\"game_session_id\":{}", Json::Quote(*p_Payload.game_session_id));
 
     s_Json += "}";
     return s_Json;

@@ -89,7 +89,7 @@ void GlacierRelay::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
 }
 
 // One observation per frame: read scene state, log changes, feed the semantic layer, publish on
-// the mission.playing edge.
+// either edge of the mission predicate (mission.playing on the rise, mission.stopped on the fall).
 void GlacierRelay::ObserveFrame()
 {
     const SceneState s_Scene = SceneObservation::ObserveScene();
@@ -116,11 +116,12 @@ void GlacierRelay::ObserveFrame()
         m_LastScene = s_Scene;
     }
 
-    // The session id is observational payload. It is read only on the frame the edge will fire,
-    // so the registry is not touched every frame.
+    // The session id is observational payload. It is read only on a frame an edge will fire (either
+    // direction), so the registry is not touched every frame. What it holds on the fall frame is
+    // one of the things the Stage A run is meant to show.
     std::optional<std::string> s_GameSessionId;
 
-    if (!m_MissionObserver.Playing() && MissionObserver::IsMissionPlaying(s_Scene))
+    if (m_MissionObserver.Playing() != MissionObserver::IsMissionPlaying(s_Scene))
         s_GameSessionId = SceneObservation::ObserveGameSessionId();
 
     const bool s_WasPlaying = m_MissionObserver.Playing();
@@ -134,7 +135,7 @@ void GlacierRelay::ObserveFrame()
 
     if (!m_Adapter)
     {
-        RelayLog::Error("mission.playing edge observed before the adapter existed; event dropped");
+        RelayLog::Error("mission lifecycle edge observed before the adapter existed; event dropped");
         return;
     }
 
