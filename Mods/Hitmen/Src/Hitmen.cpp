@@ -371,10 +371,10 @@ void Hitmen::ObserveSceneState()
     if (s_SceneLoaded == m_ObservedSceneLoaded && s_LoadingStage == m_ObservedLoadingStage)
         return;
 
-    // m_LoadingStage (0x178) has no static_assert and no other user in the SDK, so treat the
-    // stage number as unverified until a run shows it stepping through ESceneLoadingStage.
+    // m_LoadingStage (0x178) has no static_assert and no other user in the SDK. Experiment 4
+    // (2026-10-06) saw it step through ESceneLoadingStage in order on every load, so it is read as is.
     HitmenLog::Info(
-        "scene state: loaded {} -> {}, loading stage {} -> {} (unverified offset), scene '{}'",
+        "scene state: loaded {} -> {}, loading stage {} -> {}, scene '{}'",
         m_ObservedSceneLoaded, s_SceneLoaded, m_ObservedLoadingStage, s_LoadingStage,
         s_Context->m_SceneInitParameters.m_SceneResource
     );
@@ -474,33 +474,23 @@ void Hitmen::DumpPlayerRegistry(const char* p_Trigger)
         return;
     }
 
-    // What the current SDK models at 0x390, where the 2023 code read m_pLocalPlayer.
-    const auto& s_Players = s_Registry->m_PlayerData;
+    // The three words at 0x390. The SDK models them as TArray<SNetPlayerData> m_PlayerData, but on
+    // game 3.280.0.0 they read as a pointer to m_aPlayerData[0], 0 and a non-pointer value
+    // (glacier-relay HITMEN_COMPILE_ARCHAEOLOGY.md, experiment 4, F1), which matches the 2023
+    // m_pLocalPlayer reading. Logged raw, without either interpretation.
+    const auto* s_Words = reinterpret_cast<const uint64_t*>(&s_Registry->m_PlayerData);
 
-    HitmenLog::Info(
-        "registry: m_PlayerData {} entries, begin {}, end {}, allocation end {}",
-        s_Players.size(), fmt::ptr(s_Players.m_pBegin), fmt::ptr(s_Players.m_pEnd),
-        fmt::ptr(s_Players.m_pAllocationEnd)
-    );
-
-    // Whether the array is a view over the four inline slots or separate storage is not known.
-    if (s_Players.size() <= 16)
+    for (int i = 0; i < 3; ++i)
     {
-        for (size_t i = 0; i < s_Players.size(); ++i)
-        {
-            const auto* s_Entry = &s_Players.m_pBegin[i];
-            const ptrdiff_t s_Slot = s_Entry - &s_Registry->m_aPlayerData[0];
-            const bool s_Inline = s_Entry >= &s_Registry->m_aPlayerData[0] && s_Entry < &s_Registry->m_aPlayerData[4];
+        const auto s_Value = s_Words[i];
+        const auto s_SlotsBase = reinterpret_cast<uintptr_t>(&s_Registry->m_aPlayerData[0]);
+        const auto s_Offset = s_Value - s_SlotsBase;
+        const bool s_IsSlot = s_Offset < 4 * sizeof(SNetPlayerData) && s_Offset % sizeof(SNetPlayerData) == 0;
 
-            HitmenLog::Info(
-                "registry: m_PlayerData[{}] at {}, inline slot {}",
-                i, fmt::ptr(s_Entry), s_Inline ? std::to_string(s_Slot) : "none (outside m_aPlayerData)"
-            );
-        }
-    }
-    else
-    {
-        HitmenLog::Warn("registry: m_PlayerData size is implausible, entries not walked");
+        HitmenLog::Info(
+            "registry: word at 0x{:X} = {:#x}{}",
+            0x390 + i * 8, s_Value, s_IsSlot ? fmt::format(" (= &m_aPlayerData[{}])", s_Offset / sizeof(SNetPlayerData)) : ""
+        );
     }
 
     for (int i = 0; i < 4; ++i)
@@ -681,8 +671,11 @@ DEFINE_PLUGIN_DETOUR(Hitmen, bool, OnLoadScene, ZEntitySceneContext* th, SSceneI
 
 DEFINE_PLUGIN_DETOUR(Hitmen, void, OnClearScene, ZEntitySceneContext* th, bool p_FullyUnloadScene)
 {
+    // The SDK calls the flag bFullyUnloadScene; Hitmen's 2023 source called it forReload. In the one
+    // run observed it was true on a mission restart and false when changing scenes, so neither name is
+    // asserted here. Logged as the raw flag.
     HitmenLog::Info(
-        "OnClearScene enter: context {}, fully unload {}, second Hitman was found {}",
+        "OnClearScene enter: context {}, flag {}, second Hitman was found {}",
         fmt::ptr(th), p_FullyUnloadScene, static_cast<bool>(m_OtherHitman)
     );
 
