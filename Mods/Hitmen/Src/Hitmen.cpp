@@ -27,31 +27,62 @@
 
 #include "BinaryStreamReader.h"
 #include "BinaryStreamWriter.h"
+#include "HitmenLog.h"
 
 Hitmen::Hitmen()
 {
+    HitmenLog::Info(
+        "plugin constructed: instance {}, compiled against SDK {} (ABI {})",
+        fmt::ptr(this), ZHMMODSDK_VER, ZHMMODSDK_ABI_VER
+    );
+
+    const auto s_LogPath = HitmenLog::Path();
+
+    if (s_LogPath.empty())
+        Logger::Error("[Hitmen] Durable log could not be opened; only debugger output is available.");
+    else
+        Logger::Info("[Hitmen] Durable log: {}", s_LogPath);
 }
 
 Hitmen::~Hitmen()
 {
+    HitmenLog::Info("plugin destructor enter: unregistering frame update");
+
     const ZMemberDelegate<Hitmen, void(const SGameUpdateEvent&)> s_Delegate(this, &Hitmen::OnFrameUpdate);
     Globals::GameLoopManager->UnregisterFrameUpdate(s_Delegate, 1, EUpdateMode::eUpdateAlways);
+
+    HitmenLog::Info("plugin destructor exit");
 }
 
 void Hitmen::OnEngineInitialized()
 {
+    HitmenLog::Info("OnEngineInitialized enter");
+
     m_Transport = std::make_unique<NullHitmenTransport>();
+
+    HitmenLog::Info("transport: NullHitmenTransport (no sockets; inbound delivery impossible)");
 
     const ZMemberDelegate<Hitmen, void(const SGameUpdateEvent&)> s_Delegate(this, &Hitmen::OnFrameUpdate);
     Globals::GameLoopManager->RegisterFrameUpdate(s_Delegate, 1, EUpdateMode::eUpdateAlways);
 
     m_Initialized = true;
+
+    HitmenLog::Info("OnEngineInitialized exit: frame update registered (priority 1, eUpdateAlways)");
 }
 
 void Hitmen::Init()
 {
+    // AddDetour reports nothing, and whether the SDK found and patched the engine function is
+    // only in the SDK's own log. Proof that a detour is live is its first "enter" line.
+    HitmenLog::Info(
+        "Init enter: registering detours on ClearScene hook {} and LoadScene hook {}",
+        fmt::ptr(Hooks::ZEntitySceneContext_ClearScene), fmt::ptr(Hooks::ZEntitySceneContext_LoadScene)
+    );
+
     Hooks::ZEntitySceneContext_ClearScene->AddDetour(this, &Hitmen::OnClearScene);
     Hooks::ZEntitySceneContext_LoadScene->AddDetour(this, &Hitmen::OnLoadScene);
+
+    HitmenLog::Info("Init exit: OnClearScene and OnLoadScene detours registered");
 }
 
 void Hitmen::StartServer(uint16_t p_Port)
@@ -483,3 +514,13 @@ DEFINE_PLUGIN_DETOUR(Hitmen, void, OnClearScene, ZEntitySceneContext* th, bool p
 }
 
 DEFINE_ZHM_PLUGIN(Hitmen);
+
+BOOL WINAPI DllMain(HINSTANCE p_Module, DWORD p_Reason, LPVOID p_Reserved)
+{
+    if (p_Reason == DLL_PROCESS_ATTACH)
+        HitmenLog::ModuleAttached(p_Module);
+    else if (p_Reason == DLL_PROCESS_DETACH)
+        HitmenLog::ModuleDetaching(p_Reserved != nullptr);
+
+    return TRUE;
+}
