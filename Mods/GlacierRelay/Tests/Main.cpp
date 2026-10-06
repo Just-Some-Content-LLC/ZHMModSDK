@@ -1,10 +1,12 @@
 #include "TestHarness.h"
 
 void RunMissionObserverTests();
+void RunRelayAdapterTests();
 
 int main()
 {
     RunMissionObserverTests();
+    RunRelayAdapterTests();
 
     if (g_Failures == 0)
         std::printf("GlacierRelayTests: all checks passed\n");

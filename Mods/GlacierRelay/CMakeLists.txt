@@ -9,8 +9,17 @@ cmake_minimum_required(VERSION 3.12)
 #   enforces the boundary.
 
 set(RELAY_ENGINE_INDEPENDENT_SOURCES
+        Src/IRelaySink.h
+        Src/Json.cpp
+        Src/Json.h
+        Src/LogRelaySink.cpp
+        Src/LogRelaySink.h
         Src/MissionObserver.cpp
         Src/MissionObserver.h
+        Src/RelayAdapter.cpp
+        Src/RelayAdapter.h
+        Src/RelayEnvelope.cpp
+        Src/RelayEnvelope.h
         Src/RelayEvent.h
         Src/RelayLog.cpp
         Src/RelayLog.h
@@ -45,6 +54,7 @@ add_executable(GlacierRelayTests
         ${RELAY_ENGINE_INDEPENDENT_SOURCES}
         Tests/Main.cpp
         Tests/MissionObserverTests.cpp
+        Tests/RelayAdapterTests.cpp
         Tests/TestHarness.h
 )
 

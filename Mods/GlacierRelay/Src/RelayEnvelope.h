@@ -1,0 +1,31 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+
+#include "RelayEvent.h"
+
+// The envelope every published message carries (glacier-relay M1 design, section 4, and
+// protocol/README.md). Serialized as one JSON object on one line; the wire (stage 2) adds the
+// newline. All fields are adapter-owned values.
+namespace RelayProtocol
+{
+    constexpr int k_ProtocolVersion = 1;
+}
+
+struct RelayEnvelope
+{
+    int protocol_version = RelayProtocol::k_ProtocolVersion;
+    std::string adapter_instance_id; // one per adapter instance (game process)
+    uint64_t sequence = 0;           // 1, 2, 3, ... per instance; gaps mean drops
+    std::string timestamp;           // ISO 8601 UTC with milliseconds, e.g. 2026-10-06T20:34:34.787Z
+    std::string event_type;          // e.g. mission.playing
+    int schema_version = 0;          // of the payload for this event_type
+    std::string payload_json;        // already-serialized JSON object
+};
+
+namespace RelaySerialization
+{
+    std::string MissionPlayingPayload(const MissionPlayingEvent& p_Event);
+    std::string Envelope(const RelayEnvelope& p_Envelope);
+}
