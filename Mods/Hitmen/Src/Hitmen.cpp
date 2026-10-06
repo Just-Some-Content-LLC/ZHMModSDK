@@ -260,7 +260,7 @@ void Hitmen::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
 
             if (const auto s_Index = s_BpFactory->GetSubEntityIndex(0xfeede715906f747f); s_Index != -1)
             {
-                m_OtherHitman = s_BpFactory->GetSubEntity(s_Brick.m_EntityRef.m_pEntity, s_Index);
+                m_OtherHitman = s_BpFactory->GetSubEntity(s_Brick.m_EntityRef.m_pObj, s_Index);
             }
 
             if (m_OtherHitman)
