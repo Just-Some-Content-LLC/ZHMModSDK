@@ -40,6 +40,8 @@ private:
     void OnInputsAndPosition(BinaryStreamReader& p_Reader);
     void OnNpcPositions(BinaryStreamReader& p_Reader);
 
+    void ObserveSceneState();
+
 private:
     DECLARE_PLUGIN_DETOUR(Hitmen, bool, OnLoadScene, ZEntitySceneContext*, SSceneInitParameters&);
     DECLARE_PLUGIN_DETOUR(Hitmen, void, OnClearScene, ZEntitySceneContext* th, bool p_FullyUnloadScene);
@@ -61,6 +63,11 @@ private:
     bool m_Connected = false;
     float m_UpdateTimer = 0.f;
     float m_NpcUpdateTimer = 0.f;
+
+    // Used only to log each observed change once. The legacy logic never reads these.
+    bool m_ObservedMissingGlobals = false;
+    bool m_ObservedSceneLoaded = false;
+    int32_t m_ObservedLoadingStage = -1;
 };
 
 DECLARE_ZHM_PLUGIN(Hitmen)

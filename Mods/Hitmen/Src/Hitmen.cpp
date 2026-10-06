@@ -274,6 +274,8 @@ void Hitmen::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
     if (!m_Connected)
         return;*/
 
+    ObserveSceneState();
+
     auto s_Scene = Globals::Hitman5Module->m_pEntitySceneContext->m_pScene;
 
     if (!s_Scene || !(*Globals::ApplicationEngineWin32)->m_bSceneLoaded)
@@ -339,6 +341,44 @@ void Hitmen::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
         if (m_IsServer)
             SendNpcPositions(m_ClientConnection);
     }*/
+}
+
+// Logs the scene state the legacy logic in OnFrameUpdate polls, whenever it changes. Read-only.
+void Hitmen::ObserveSceneState()
+{
+    const auto* s_Context = Globals::Hitman5Module ? Globals::Hitman5Module->m_pEntitySceneContext : nullptr;
+    const auto* s_Engine = Globals::ApplicationEngineWin32 ? *Globals::ApplicationEngineWin32 : nullptr;
+
+    if (!s_Context || !s_Engine)
+    {
+        if (!m_ObservedMissingGlobals)
+        {
+            m_ObservedMissingGlobals = true;
+            HitmenLog::Error(
+                "scene state unavailable: scene context {}, application engine {}",
+                fmt::ptr(s_Context), fmt::ptr(s_Engine)
+            );
+        }
+
+        return;
+    }
+
+    const bool s_SceneLoaded = s_Context->m_pScene && s_Engine->m_bSceneLoaded;
+    const auto s_LoadingStage = static_cast<int32_t>(s_Context->m_LoadingStage);
+
+    if (s_SceneLoaded == m_ObservedSceneLoaded && s_LoadingStage == m_ObservedLoadingStage)
+        return;
+
+    // m_LoadingStage (0x178) has no static_assert and no other user in the SDK, so treat the
+    // stage number as unverified until a run shows it stepping through ESceneLoadingStage.
+    HitmenLog::Info(
+        "scene state: loaded {} -> {}, loading stage {} -> {} (unverified offset), scene '{}'",
+        m_ObservedSceneLoaded, s_SceneLoaded, m_ObservedLoadingStage, s_LoadingStage,
+        s_Context->m_SceneInitParameters.m_SceneResource
+    );
+
+    m_ObservedSceneLoaded = s_SceneLoaded;
+    m_ObservedLoadingStage = s_LoadingStage;
 }
 
 void Hitmen::OnDrawMenu()
@@ -489,6 +529,15 @@ void Hitmen::OnDraw3D(IRenderer* p_Renderer)
 
 DEFINE_PLUGIN_DETOUR(Hitmen, bool, OnLoadScene, ZEntitySceneContext* th, SSceneInitParameters& p_SceneData)
 {
+    HitmenLog::Info(
+        "OnLoadScene enter: context {}, scene '{}', type '{}', codename hint '{}', start game {}, {} additional bricks",
+        fmt::ptr(th), p_SceneData.m_SceneResource, p_SceneData.m_Type, p_SceneData.m_CodeNameHint,
+        p_SceneData.m_bStartGame, p_SceneData.m_aAdditionalBrickResources.size()
+    );
+
+    for (const auto& s_Brick : p_SceneData.m_aAdditionalBrickResources)
+        HitmenLog::Info("OnLoadScene brick: '{}'", s_Brick);
+
     // p_SceneData.m_sceneName = "assembly:/_pro/scenes/users/notex/test.entity";
     //p_SceneData.m_sceneName = "assembly:/_pro/scenes/missions/golden/mission_gecko/scene_gecko_basic.entity";
     //p_SceneData.m_sceneName = "assembly:/_PRO/Scenes/Missions/TheFacility/_Scene_Mission_Polarbear_Module_002_B.entity";
@@ -502,14 +551,22 @@ DEFINE_PLUGIN_DETOUR(Hitmen, bool, OnLoadScene, ZEntitySceneContext* th, SSceneI
      * Loading scene: assembly:/_pro/scenes/missions/golden/mission_gecko/scene_gecko_basic.entity
 + With brick: assembly:/_PRO/scenes/missions/golden/mission_gecko/mission_gecko.brick
      */
+    HitmenLog::Info("OnLoadScene exit: continuing to the original");
     return HookResult<bool>(HookAction::Continue());
 }
 
 DEFINE_PLUGIN_DETOUR(Hitmen, void, OnClearScene, ZEntitySceneContext* th, bool p_FullyUnloadScene)
 {
+    HitmenLog::Info(
+        "OnClearScene enter: context {}, fully unload {}, second Hitman was found {}",
+        fmt::ptr(th), p_FullyUnloadScene, static_cast<bool>(m_OtherHitman)
+    );
+
     m_OtherHitman = {};
     m_FirstHitman = {};
     m_SceneLoaded = false;
+
+    HitmenLog::Info("OnClearScene exit: continuing to the original");
     return HookResult<void>(HookAction::Continue());
 }
 
