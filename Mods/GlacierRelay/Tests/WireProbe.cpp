@@ -3,9 +3,11 @@
 //
 //   GlacierRelayWireProbe <port> <step>[,<step>...]
 //
-// Steps: "stage1" replays the scene sequence recorded in the stage 1 runtime experiment through
-// MissionObserver (3 events); "publish" publishes one mission.playing event directly;
-// "sleep:<ms>" waits. Exit code is 0 when the adapter's sequence count matches what was asked.
+// Steps: "stage1" replays the scene sequence recorded in the M1 stage 1 runtime experiment
+// through MissionObserver (since M2: 6 events, a mission.playing/mission.stopped pair per mission
+// entry); "publish" publishes one mission.playing directly; "stop" publishes one mission.stopped
+// directly; "sleep:<ms>" waits. Exit code is 0 when the adapter's sequence count matches what was
+// asked.
 
 #include <cstdio>
 #include <cstdlib>
@@ -105,6 +107,15 @@ int main(int p_Argc, char** p_Argv)
         else if (s_Step == "publish")
         {
             MissionPlayingEvent s_Event;
+            s_Event.scene_resource = "assembly:/_PRO/Scenes/Missions/Paris/_Scene_FashionShowHit_01.entity";
+            s_Event.scene_type = "mission";
+            s_Event.codename_hint = "Peacock";
+            s_Adapter.Publish(s_Event);
+            ++s_Expected;
+        }
+        else if (s_Step == "stop")
+        {
+            MissionStoppedEvent s_Event;
             s_Event.scene_resource = "assembly:/_PRO/Scenes/Missions/Paris/_Scene_FashionShowHit_01.entity";
             s_Event.scene_type = "mission";
             s_Event.codename_hint = "Peacock";
