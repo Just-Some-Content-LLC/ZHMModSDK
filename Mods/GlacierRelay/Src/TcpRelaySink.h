@@ -59,6 +59,12 @@ private:
     bool TryConnect();
     void Disconnect(const char* p_Reason);
     bool SendLine(const std::string& p_Line);
+
+    struct Queued
+    {
+        uint64_t sequence = 0;
+        std::string line; // already ends in '\n'
+    };
     void DiscardInbound();
     bool WaitForWork(uint32_t p_TimeoutMs);
 
@@ -67,7 +73,7 @@ private:
 
     mutable std::mutex m_Mutex;
     std::condition_variable m_Wake;
-    std::deque<std::string> m_Queue; // lines, each already ending in '\n'
+    std::deque<Queued> m_Queue;
     bool m_Stop = false;
     Stats m_Stats;
 

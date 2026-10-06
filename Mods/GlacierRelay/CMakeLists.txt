@@ -72,3 +72,18 @@ target_link_libraries(GlacierRelayTests PRIVATE
 
 enable_testing()
 add_test(NAME GlacierRelayTests COMMAND GlacierRelayTests)
+
+# Standalone Windows client for the Windows -> WSL2 -> BEAM integration test (no game involved).
+add_executable(GlacierRelayWireProbe
+        ${RELAY_ENGINE_INDEPENDENT_SOURCES}
+        Tests/WireProbe.cpp
+)
+
+target_include_directories(GlacierRelayWireProbe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/Src
+)
+
+target_link_libraries(GlacierRelayWireProbe PRIVATE
+        fmt::fmt
+        ws2_32
+)

@@ -83,7 +83,7 @@ void TcpRelaySink::Publish(const PublishedEnvelope& p_Envelope)
             s_DroppedOldest = true;
         }
 
-        m_Queue.push_back(std::move(s_Line));
+        m_Queue.push_back({p_Envelope.sequence, std::move(s_Line)});
     }
 
     if (s_DroppedOldest)
@@ -149,7 +149,7 @@ void TcpRelaySink::SenderLoop()
         // Connected: wait for a line, or wake periodically to notice a closed peer.
         WaitForWork(500);
 
-        std::string s_Line;
+        Queued s_Item;
 
         {
             std::lock_guard s_Lock(m_Mutex);
@@ -159,7 +159,7 @@ void TcpRelaySink::SenderLoop()
 
             if (!m_Queue.empty())
             {
-                s_Line = std::move(m_Queue.front());
+                s_Item = std::move(m_Queue.front());
                 m_Queue.pop_front();
             }
         }
@@ -168,27 +168,33 @@ void TcpRelaySink::SenderLoop()
 
         if (AsSocket(m_Socket) == INVALID_SOCKET)
         {
-            if (!s_Line.empty())
+            if (!s_Item.line.empty())
             {
                 std::lock_guard s_Lock(m_Mutex);
                 ++m_Stats.dropped;
+                RelayLog::Warn("tcp sink: connection lost before #{} was sent; dropped", s_Item.sequence);
             }
 
             continue;
         }
 
-        if (s_Line.empty())
+        if (s_Item.line.empty())
             continue;
 
-        if (SendLine(s_Line))
+        if (SendLine(s_Item.line))
         {
-            std::lock_guard s_Lock(m_Mutex);
-            ++m_Stats.sent;
+            {
+                std::lock_guard s_Lock(m_Mutex);
+                ++m_Stats.sent;
+            }
+
+            RelayLog::Info("tcp sink: sent #{} ({} bytes)", s_Item.sequence, s_Item.line.size());
         }
         else
         {
             std::lock_guard s_Lock(m_Mutex);
             ++m_Stats.dropped;
+            RelayLog::Warn("tcp sink: #{} not delivered", s_Item.sequence);
         }
     }
 
