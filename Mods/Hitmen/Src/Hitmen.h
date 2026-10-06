@@ -1,15 +1,15 @@
 #pragma once
 
+#include <memory>
 #include <random>
 #include <unordered_map>
 
 #include "IPluginInterface.h"
 #include "Glacier/ZEntity.h"
 #include "Glacier/ZInput.h"
-#include "steam/steamnetworkingtypes.h"
+#include "HitmenTransport.h"
 
 class BinaryStreamReader;
-class ISteamNetworkingSockets;
 class ZHitman5;
 
 class Hitmen : public IPluginInterface
@@ -22,19 +22,17 @@ public:
     void Init() override;
     void OnDrawMenu() override;
     void OnDrawUI(bool p_HasFocus) override;
-    void OnServerStatus(SteamNetConnectionStatusChangedCallback_t* p_Info);
-    void OnClientStatus(SteamNetConnectionStatusChangedCallback_t* p_Info);
     void OnDraw3D(IRenderer* p_Renderer) override;
 
 private:
     void OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent);
     void StartServer(uint16_t p_Port);
     void Connect(const std::string& p_Address, uint16_t p_Port);
-    void UpdateServer();
-    void UpdateClient();
+    void UpdateConnection();
+    void ProcessMessages();
 
-    void SendInputsAndPosition(HSteamNetConnection p_Connection);
-    void SendNpcPositions(HSteamNetConnection p_Connection);
+    void SendInputsAndPosition(HitmenConnection p_Connection);
+    void SendNpcPositions(HitmenConnection p_Connection);
 
     void OnInputsAndPosition(BinaryStreamReader& p_Reader);
     void OnNpcPositions(BinaryStreamReader& p_Reader);
@@ -49,10 +47,8 @@ private:
     ZEntityRef m_OtherHitman;
     ZEntityRef m_OurHitman;
     TEntityRef<ZHitman5> m_FirstHitman;
-    ISteamNetworkingSockets* m_Sockets = nullptr;
-    HSteamListenSocket m_ServerSocket;
-    HSteamNetConnection m_ClientConnection;
-    HSteamNetPollGroup m_PollGroup;
+    std::unique_ptr<IHitmenTransport> m_Transport;
+    HitmenConnection m_ClientConnection = k_InvalidHitmenConnection;
     bool m_SceneLoaded = false;
     bool m_IsServer = false;
     bool m_IsClient = false;

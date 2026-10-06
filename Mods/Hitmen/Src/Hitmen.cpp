@@ -23,36 +23,23 @@
 #include "Glacier/ZApplicationEngineWin32.h"
 #include "Glacier/ZEngineAppCommon.h"
 #include "Glacier/ZPlayerRegistry.h"
-#include "steam/steamnetworkingsockets.h"
 
 #include "BinaryStreamReader.h"
 #include "BinaryStreamWriter.h"
 
-static Hitmen* g_HitmenInstance = nullptr;
-
 Hitmen::Hitmen()
 {
-    g_HitmenInstance = this;
 }
 
 Hitmen::~Hitmen()
 {
     const ZMemberDelegate<Hitmen, void(const SGameUpdateEvent&)> s_Delegate(this, &Hitmen::OnFrameUpdate);
     Globals::GameLoopManager->UnregisterFrameUpdate(s_Delegate, 1, EUpdateMode::eUpdateAlways);
-
-    GameNetworkingSockets_Kill();
 }
 
 void Hitmen::OnEngineInitialized()
 {
-    SteamDatagramErrMsg s_ErrorMessage;
-    if (!GameNetworkingSockets_Init(nullptr, s_ErrorMessage))
-    {
-        Logger::Error("[Hitmen] Could not initialize game networking sockets. Error: {}", s_ErrorMessage);
-        return;
-    }
-
-    m_Sockets = SteamNetworkingSockets();
+    m_Transport = std::make_unique<NullHitmenTransport>();
 
     const ZMemberDelegate<Hitmen, void(const SGameUpdateEvent&)> s_Delegate(this, &Hitmen::OnFrameUpdate);
     Globals::GameLoopManager->RegisterFrameUpdate(s_Delegate, 1, EUpdateMode::eUpdateAlways);
@@ -67,33 +54,11 @@ void Hitmen::Init()
     Hooks::ZPlayerRegistry_GetLocalPlayer->AddDetour(this, &Hitmen::GetLocalPlayer);
 }
 
-static void ServerCallback(SteamNetConnectionStatusChangedCallback_t* p_Info)
-{
-    g_HitmenInstance->OnServerStatus(p_Info);
-}
-
 void Hitmen::StartServer(uint16_t p_Port)
 {
-    SteamNetworkingIPAddr s_BindAddr {};
-    s_BindAddr.Clear();
-    s_BindAddr.m_port = p_Port;
-
-    SteamNetworkingConfigValue_t s_Config {};
-    s_Config.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged, (void*)ServerCallback);
-
-    m_ServerSocket = m_Sockets->CreateListenSocketIP(s_BindAddr, 1, &s_Config);
-
-    if (m_ServerSocket == k_HSteamListenSocket_Invalid)
+    if (!m_Transport->StartServer(p_Port))
     {
         Logger::Error("[Hitmen] Failed to start server.");
-        return;
-    }
-
-    m_PollGroup = m_Sockets->CreatePollGroup();
-
-    if (m_PollGroup == k_HSteamNetPollGroup_Invalid)
-    {
-        Logger::Error("[Hitmen] Failed to create poll group.");
         return;
     }
 
@@ -101,78 +66,28 @@ void Hitmen::StartServer(uint16_t p_Port)
     m_IsServer = true;
 }
 
-static void ClientCallback(SteamNetConnectionStatusChangedCallback_t* p_Info)
-{
-    g_HitmenInstance->OnClientStatus(p_Info);
-}
-
 void Hitmen::Connect(const std::string& p_Address, uint16_t p_Port)
 {
-    SteamNetworkingIPAddr s_Addr {};
-    s_Addr.Clear();
-
-    if (!s_Addr.ParseString((p_Address + ":" + std::to_string(p_Port)).c_str()))
-    {
-        Logger::Error("[Hitmen] Invalid address specified.");
-        return;
-    }
-
-    SteamNetworkingConfigValue_t s_Config {};
-    s_Config.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged, (void*)ClientCallback);
-
-    m_ClientConnection = m_Sockets->ConnectByIPAddress(s_Addr, 1, &s_Config);
-
-    if (m_ClientConnection == k_HSteamNetConnection_Invalid)
+    if (!m_Transport->Connect(p_Address, p_Port))
     {
         Logger::Error("[Hitmen] Could not create client connection.");
         return;
     }
 }
 
-void Hitmen::OnServerStatus(SteamNetConnectionStatusChangedCallback_t* p_Info)
+void Hitmen::UpdateConnection()
 {
-    Logger::Debug("[Hitmen] Server connection status changed: {}", static_cast<int>(p_Info->m_info.m_eState));
+    const auto s_Connection = m_Transport->PollConnected();
 
-    switch (p_Info->m_info.m_eState)
-    {
-        case k_ESteamNetworkingConnectionState_Connecting:
-        {
-            if (m_Sockets->AcceptConnection(p_Info->m_hConn) != k_EResultOK)
-            {
-                m_Sockets->CloseConnection(p_Info->m_hConn, 0, nullptr, false);
-                Logger::Warn("[Hitmen] Can't accept connection.  (It was already closed?)");
-                break;
-            }
+    if (s_Connection == k_InvalidHitmenConnection)
+        return;
 
-            if (!m_Sockets->SetConnectionPollGroup(p_Info->m_hConn, m_PollGroup))
-            {
-                m_Sockets->CloseConnection(p_Info->m_hConn, 0, nullptr, false);
-                Logger::Warn("[Hitmen] Failed to set client connection poll group.");
-                break;
-            }
+    // TODO: Multiple clients.
+    m_ClientConnection = s_Connection;
+    m_Connected = true;
 
-            // TODO: Multiple clients.
-            m_ClientConnection = p_Info->m_hConn;
-            m_Connected = true;
-            break;
-        }
-
-    }
-}
-
-void Hitmen::OnClientStatus(SteamNetConnectionStatusChangedCallback_t* p_Info)
-{
-    Logger::Debug("[Hitmen] Client connection status changed: {}", static_cast<int>(p_Info->m_info.m_eState));
-
-    switch (p_Info->m_info.m_eState)
-    {
-        case k_ESteamNetworkingConnectionState_Connected:
-        {
-            m_Connected = true;
-            m_IsClient = true;
-            break;
-        }
-    }
+    if (!m_IsServer)
+        m_IsClient = true;
 }
 
 enum MessageId
@@ -182,25 +97,14 @@ enum MessageId
 };
 
 
-void Hitmen::UpdateServer()
+void Hitmen::ProcessMessages()
 {
-    ISteamNetworkingMessage* s_Msgs[100];
-    const int s_MsgCount = m_Sockets->ReceiveMessagesOnPollGroup(m_PollGroup, s_Msgs, _countof(s_Msgs));
-
-    if (s_MsgCount < 0)
+    for (const auto& s_Msg : m_Transport->ReceiveMessages())
     {
-        Logger::Error("[Hitmen] Server error.");
-        return;
-    }
-
-    for (int i = 0; i < s_MsgCount; ++i)
-    {
-        const auto s_Msg = s_Msgs[i];
-
-        //Logger::Debug("[Hitmen] Got message with {} bytes.", s_Msg->m_cbSize);
+        //Logger::Debug("[Hitmen] Got message with {} bytes.", s_Msg.m_Data.size());
 
         // TODO: This is extremely incredibly unsafe
-        BinaryStreamReader s_Reader(s_Msg->m_pData, s_Msg->m_cbSize);
+        BinaryStreamReader s_Reader(s_Msg.m_Data.data(), s_Msg.m_Data.size());
 
         switch (s_Reader.Read<MessageId>())
         {
@@ -212,48 +116,10 @@ void Hitmen::UpdateServer()
                 OnNpcPositions(s_Reader);
                 break;
         }
-
-        s_Msg->Release();
-    }
-
-}
-
-void Hitmen::UpdateClient()
-{
-    ISteamNetworkingMessage* s_Msgs[100];
-    const int s_MsgCount = m_Sockets->ReceiveMessagesOnConnection(m_ClientConnection, s_Msgs, _countof(s_Msgs));
-
-    if (s_MsgCount < 0)
-    {
-        Logger::Error("[Hitmen] Client error.");
-        return;
-    }
-
-    for (int i = 0; i < s_MsgCount; ++i)
-    {
-        const auto s_Msg = s_Msgs[i];
-
-        //Logger::Debug("[Hitmen] Got message with {} bytes.", s_Msg->m_cbSize);
-
-        // TODO: This is extremely incredibly unsafe
-        BinaryStreamReader s_Reader(s_Msg->m_pData, s_Msg->m_cbSize);
-
-        switch (s_Reader.Read<MessageId>())
-        {
-            case InputsAndPositions:
-                OnInputsAndPosition(s_Reader);
-                break;
-
-            case NpcPositions:
-                OnNpcPositions(s_Reader);
-                break;
-        }
-
-        s_Msg->Release();
     }
 }
 
-void Hitmen::SendInputsAndPosition(HSteamNetConnection p_Connection)
+void Hitmen::SendInputsAndPosition(HitmenConnection p_Connection)
 {
     BinaryStreamWriter s_Writer(sizeof(SMatrix) + 0x148);
 
@@ -262,10 +128,10 @@ void Hitmen::SendInputsAndPosition(HSteamNetConnection p_Connection)
     s_Writer.Write(m_OurHitman.QueryInterface<ZSpatialEntity>()->GetWorldMatrix());
     s_Writer.WriteBinary(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(m_OurHitman.QueryInterface<ZHitman5>()->m_pCharacterInputProcessor->m_pInput) + sizeof(uintptr_t)), 0x148);
 
-    m_Sockets->SendMessageToConnection(p_Connection, s_Writer.Buffer(), s_Writer.WrittenBytes(), k_nSteamNetworkingSend_UnreliableNoNagle, nullptr);
+    m_Transport->SendUnreliable(p_Connection, s_Writer.Buffer(), s_Writer.WrittenBytes());
 }
 
-void Hitmen::SendNpcPositions(HSteamNetConnection p_Connection)
+void Hitmen::SendNpcPositions(HitmenConnection p_Connection)
 {
     BinaryStreamWriter s_Writer(8192);
 
@@ -293,7 +159,7 @@ void Hitmen::SendNpcPositions(HSteamNetConnection p_Connection)
         }
     }
 
-    m_Sockets->SendMessageToConnection(p_Connection, s_Writer.Buffer(), s_Writer.WrittenBytes(), k_nSteamNetworkingSend_UnreliableNoNagle, nullptr);
+    m_Transport->SendUnreliable(p_Connection, s_Writer.Buffer(), s_Writer.WrittenBytes());
 }
 
 void Hitmen::OnInputsAndPosition(BinaryStreamReader& p_Reader)
@@ -356,16 +222,8 @@ void Hitmen::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
     if (!m_Initialized)
         return;
 
-    if (m_IsServer)
-    {
-        UpdateServer();
-    }
-    else if (m_IsClient)
-    {
-        UpdateClient();
-    }
-
-    m_Sockets->RunCallbacks();
+    UpdateConnection();
+    ProcessMessages();
 
     if (!m_Connected)
         return;*/
