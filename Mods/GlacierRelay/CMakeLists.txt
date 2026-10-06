@@ -11,11 +11,14 @@ cmake_minimum_required(VERSION 3.12)
 set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/RelayLog.cpp
         Src/RelayLog.h
+        Src/SceneState.h
 )
 
 set(RELAY_GLACIER_FACING_SOURCES
         Src/GlacierRelay.cpp
         Src/GlacierRelay.h
+        Src/SceneObservation.cpp
+        Src/SceneObservation.h
 )
 
 add_library(GlacierRelay SHARED

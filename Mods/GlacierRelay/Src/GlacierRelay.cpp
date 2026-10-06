@@ -1,8 +1,13 @@
 #include "GlacierRelay.h"
 
+#include "Globals.h"
 #include "Logging.h"
 #include "ModSDKVersion.h"
+#include "Glacier/SGameUpdateEvent.h"
+#include "Glacier/ZGameLoopManager.h"
+
 #include "RelayLog.h"
+#include "SceneObservation.h"
 
 GlacierRelay::GlacierRelay()
 {
@@ -21,6 +26,12 @@ GlacierRelay::GlacierRelay()
 
 GlacierRelay::~GlacierRelay()
 {
+    if (m_FrameUpdateRegistered)
+    {
+        const ZMemberDelegate<GlacierRelay, void(const SGameUpdateEvent&)> s_Delegate(this, &GlacierRelay::OnFrameUpdate);
+        Globals::GameLoopManager->UnregisterFrameUpdate(s_Delegate, 1, EUpdateMode::eUpdateAlways);
+    }
+
     RelayLog::Info("plugin destroyed");
 }
 
@@ -31,7 +42,44 @@ void GlacierRelay::Init()
 
 void GlacierRelay::OnEngineInitialized()
 {
-    RelayLog::Info("OnEngineInitialized");
+    const ZMemberDelegate<GlacierRelay, void(const SGameUpdateEvent&)> s_Delegate(this, &GlacierRelay::OnFrameUpdate);
+    Globals::GameLoopManager->RegisterFrameUpdate(s_Delegate, 1, EUpdateMode::eUpdateAlways);
+    m_FrameUpdateRegistered = true;
+
+    RelayLog::Info("OnEngineInitialized: frame update registered (priority 1, eUpdateAlways)");
+}
+
+void GlacierRelay::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
+{
+    RelayLog::Guard("ObserveFrame", [&] { ObserveFrame(); });
+}
+
+// One observation per frame. Logs scene-state changes; the semantic layer is fed from here.
+void GlacierRelay::ObserveFrame()
+{
+    const SceneState s_Scene = SceneObservation::ObserveScene();
+
+    if (!s_Scene.available)
+    {
+        if (!m_LoggedUnavailable)
+        {
+            m_LoggedUnavailable = true;
+            RelayLog::Error("scene state unavailable: scene context or application engine global is null");
+        }
+
+        return;
+    }
+
+    if (s_Scene != m_LastScene)
+    {
+        RelayLog::Info(
+            "scene: loaded {}, stage {}, type '{}', hint '{}', resource '{}'",
+            s_Scene.scene_loaded, s_Scene.loading_stage, s_Scene.scene_type, s_Scene.codename_hint,
+            s_Scene.scene_resource
+        );
+
+        m_LastScene = s_Scene;
+    }
 }
 
 DEFINE_ZHM_PLUGIN(GlacierRelay);
