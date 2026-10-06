@@ -63,6 +63,7 @@ set(MODS
         World
         FreelancerSeeder
         QuickSave
+        GlacierRelay
 )
 
 foreach (MOD IN LISTS MODS)
