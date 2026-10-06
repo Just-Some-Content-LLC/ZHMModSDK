@@ -438,7 +438,7 @@ void Hitmen::OnDraw3D(IRenderer* p_Renderer)
     }*/
 }
 
-DEFINE_PLUGIN_DETOUR(Hitmen, void, OnLoadScene, ZEntitySceneContext* th, ZSceneData& p_SceneData)
+DEFINE_PLUGIN_DETOUR(Hitmen, bool, OnLoadScene, ZEntitySceneContext* th, SSceneInitParameters& p_SceneData)
 {
     // p_SceneData.m_sceneName = "assembly:/_pro/scenes/users/notex/test.entity";
     //p_SceneData.m_sceneName = "assembly:/_pro/scenes/missions/golden/mission_gecko/scene_gecko_basic.entity";
@@ -453,7 +453,7 @@ DEFINE_PLUGIN_DETOUR(Hitmen, void, OnLoadScene, ZEntitySceneContext* th, ZSceneD
      * Loading scene: assembly:/_pro/scenes/missions/golden/mission_gecko/scene_gecko_basic.entity
 + With brick: assembly:/_PRO/scenes/missions/golden/mission_gecko/mission_gecko.brick
      */
-    return HookResult<void>(HookAction::Continue());
+    return HookResult<bool>(HookAction::Continue());
 }
 
 DEFINE_PLUGIN_DETOUR(Hitmen, void, OnClearScene, ZEntitySceneContext* th, bool p_FullyUnloadScene)
