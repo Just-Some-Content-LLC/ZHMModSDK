@@ -156,7 +156,7 @@ void Hitmen::SendNpcPositions(HitmenConnection p_Connection)
         if (s_Actor.m_pInterfaceRef->IsAlive())
         {
             s_Writer.Write(i);
-            s_Writer.Write(s_Actor.m_ref.QueryInterface<ZSpatialEntity>()->GetWorldMatrix());
+            s_Writer.Write(s_Actor.m_entityRef.QueryInterface<ZSpatialEntity>()->GetWorldMatrix());
         }
     }
 
@@ -209,7 +209,7 @@ void Hitmen::OnNpcPositions(BinaryStreamReader& p_Reader)
 
             if (s_Actor.m_pInterfaceRef->IsAlive())
             {
-                s_Actor.m_ref.QueryInterface<ZSpatialEntity>()->SetWorldMatrix(s_ActorPos);
+                s_Actor.m_entityRef.QueryInterface<ZSpatialEntity>()->SetWorldMatrix(s_ActorPos);
             }
         }
     }
@@ -241,12 +241,12 @@ void Hitmen::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
         if (!s_LocalHitman)
             return;
 
-        const auto s_HitmanSpatial = s_LocalHitman.m_ref.QueryInterface<ZSpatialEntity>();
+        const auto s_HitmanSpatial = s_LocalHitman.m_entityRef.QueryInterface<ZSpatialEntity>();
 
         if (!s_HitmanSpatial)
             return;
 
-        m_OurHitman = s_LocalHitman.m_ref;
+        m_OurHitman = s_LocalHitman.m_entityRef;
 
         for (auto& s_Brick : Globals::Hitman5Module->m_pEntitySceneContext->m_aLoadedBricks)
         {
@@ -369,7 +369,7 @@ void Hitmen::OnDrawMenu()
 
         auto s_LocalHitman = SDK()->GetLocalPlayer();
 
-        Logger::Debug("[Hitmen] Local player: {} (base {})", fmt::ptr(s_LocalHitman.m_pInterfaceRef), fmt::ptr(s_LocalHitman.m_ref.GetEntity()));
+        Logger::Debug("[Hitmen] Local player: {} (base {})", fmt::ptr(s_LocalHitman.m_pInterfaceRef), fmt::ptr(s_LocalHitman.m_entityRef.GetEntity()));
 
 
     }
