@@ -6,6 +6,8 @@
 #include "Glacier/SGameUpdateEvent.h"
 #include "Glacier/ZGameLoopManager.h"
 
+#include "LogRelaySink.h"
+#include "RelayEnvelope.h"
 #include "RelayLog.h"
 #include "SceneObservation.h"
 
@@ -42,6 +44,13 @@ void GlacierRelay::Init()
 
 void GlacierRelay::OnEngineInitialized()
 {
+    // Stage 1: the only sink is the durable log. The adapter exists before the first frame update.
+    m_Adapter = std::make_unique<RelayAdapter>(
+        std::make_unique<LogRelaySink>(), RelayAdapter::NewInstanceId(), &RelayAdapter::UtcNow
+    );
+
+    RelayLog::Info("adapter instance {}, sink LogRelaySink, protocol version {}", m_Adapter->InstanceId(), RelayProtocol::k_ProtocolVersion);
+
     const ZMemberDelegate<GlacierRelay, void(const SGameUpdateEvent&)> s_Delegate(this, &GlacierRelay::OnFrameUpdate);
     Globals::GameLoopManager->RegisterFrameUpdate(s_Delegate, 1, EUpdateMode::eUpdateAlways);
     m_FrameUpdateRegistered = true;
@@ -54,7 +63,8 @@ void GlacierRelay::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
     RelayLog::Guard("ObserveFrame", [&] { ObserveFrame(); });
 }
 
-// One observation per frame. Logs scene-state changes; the semantic layer is fed from here.
+// One observation per frame: read scene state, log changes, feed the semantic layer, publish on
+// the mission.playing edge.
 void GlacierRelay::ObserveFrame()
 {
     const SceneState s_Scene = SceneObservation::ObserveScene();
@@ -80,6 +90,30 @@ void GlacierRelay::ObserveFrame()
 
         m_LastScene = s_Scene;
     }
+
+    // The session id is observational payload. It is read only on the frame the edge will fire,
+    // so the registry is not touched every frame.
+    std::optional<std::string> s_GameSessionId;
+
+    if (!m_MissionObserver.Playing() && MissionObserver::IsMissionPlaying(s_Scene))
+        s_GameSessionId = SceneObservation::ObserveGameSessionId();
+
+    const bool s_WasPlaying = m_MissionObserver.Playing();
+    const auto s_Event = m_MissionObserver.Update(s_Scene, s_GameSessionId);
+
+    if (m_MissionObserver.Playing() != s_WasPlaying)
+        RelayLog::Info("mission playing: {} -> {}", s_WasPlaying, m_MissionObserver.Playing());
+
+    if (!s_Event)
+        return;
+
+    if (!m_Adapter)
+    {
+        RelayLog::Error("mission.playing edge observed before the adapter existed; event dropped");
+        return;
+    }
+
+    m_Adapter->Publish(*s_Event);
 }
 
 DEFINE_ZHM_PLUGIN(GlacierRelay);

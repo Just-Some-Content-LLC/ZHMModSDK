@@ -1,7 +1,11 @@
 #pragma once
 
+#include <memory>
+
 #include "IPluginInterface.h"
 
+#include "MissionObserver.h"
+#include "RelayAdapter.h"
 #include "SceneState.h"
 
 struct SGameUpdateEvent;
@@ -25,6 +29,9 @@ private:
     bool m_FrameUpdateRegistered = false;
     bool m_LoggedUnavailable = false;
     SceneState m_LastScene;
+
+    MissionObserver m_MissionObserver;
+    std::unique_ptr<RelayAdapter> m_Adapter;
 };
 
 DECLARE_ZHM_PLUGIN(GlacierRelay)
