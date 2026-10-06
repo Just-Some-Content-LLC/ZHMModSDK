@@ -52,7 +52,6 @@ void Hitmen::Init()
 {
     Hooks::ZEntitySceneContext_ClearScene->AddDetour(this, &Hitmen::OnClearScene);
     Hooks::ZEntitySceneContext_LoadScene->AddDetour(this, &Hitmen::OnLoadScene);
-    Hooks::ZPlayerRegistry_GetLocalPlayer->AddDetour(this, &Hitmen::GetLocalPlayer);
 }
 
 void Hitmen::StartServer(uint16_t p_Port)
@@ -462,13 +461,6 @@ DEFINE_PLUGIN_DETOUR(Hitmen, void, OnClearScene, ZEntitySceneContext* th, bool p
     m_FirstHitman = {};
     m_SceneLoaded = false;
     return HookResult<void>(HookAction::Continue());
-}
-
-DEFINE_PLUGIN_DETOUR(Hitmen, TEntityRef<ZHitman5>*, GetLocalPlayer, ZPlayerRegistry* th, TEntityRef<ZHitman5>* out)
-{
-    auto s_Result = p_Hook->CallOriginal(th, out);
-
-    return HookResult(HookAction::Return(), out);
 }
 
 DEFINE_ZHM_PLUGIN(Hitmen);
