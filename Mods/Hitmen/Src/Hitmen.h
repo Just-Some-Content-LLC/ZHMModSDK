@@ -41,6 +41,7 @@ private:
     void OnNpcPositions(BinaryStreamReader& p_Reader);
 
     void ObserveSceneState();
+    void ObserveLocalPlayer(const SGameUpdateEvent& p_UpdateEvent);
 
 private:
     DECLARE_PLUGIN_DETOUR(Hitmen, bool, OnLoadScene, ZEntitySceneContext*, SSceneInitParameters&);
@@ -68,6 +69,9 @@ private:
     bool m_ObservedMissingGlobals = false;
     bool m_ObservedSceneLoaded = false;
     int32_t m_ObservedLoadingStage = -1;
+    bool m_ObservedLocalPlayer = false;
+    bool m_ObservedLocalPlayerMissing = false;
+    float m_TransformSampleTimer = 0.f;
 };
 
 DECLARE_ZHM_PLUGIN(Hitmen)

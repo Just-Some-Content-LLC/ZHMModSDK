@@ -281,6 +281,8 @@ void Hitmen::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
     if (!s_Scene || !(*Globals::ApplicationEngineWin32)->m_bSceneLoaded)
         return;
 
+    ObserveLocalPlayer(p_UpdateEvent);
+
     if (!m_SceneLoaded)
     {
         auto s_LocalHitman = SDK()->GetLocalPlayer();
@@ -379,6 +381,72 @@ void Hitmen::ObserveSceneState()
 
     m_ObservedSceneLoaded = s_SceneLoaded;
     m_ObservedLoadingStage = s_LoadingStage;
+}
+
+// Logs local-player resolution once per scene, then samples the local Hitman's world transform
+// every few seconds. Read-only: the same lookups the legacy logic in OnFrameUpdate performs.
+void Hitmen::ObserveLocalPlayer(const SGameUpdateEvent& p_UpdateEvent)
+{
+    const auto s_LocalHitman = SDK()->GetLocalPlayer();
+    const auto* s_Spatial = s_LocalHitman ? s_LocalHitman.m_entityRef.QueryInterface<ZSpatialEntity>() : nullptr;
+
+    if (!s_Spatial)
+    {
+        if (!m_ObservedLocalPlayerMissing)
+        {
+            m_ObservedLocalPlayerMissing = true;
+            HitmenLog::Info(
+                "local player not resolved in this scene yet: ZHitman5 {}, ZSpatialEntity {}",
+                fmt::ptr(s_LocalHitman.m_pInterfaceRef), fmt::ptr(s_Spatial)
+            );
+        }
+
+        return;
+    }
+
+    if (!m_ObservedLocalPlayer)
+    {
+        m_ObservedLocalPlayer = true;
+        m_TransformSampleTimer = 0.f;
+
+        HitmenLog::Info(
+            "local player resolved: ZHitman5 {}, entity {}, ZSpatialEntity {}",
+            fmt::ptr(s_LocalHitman.m_pInterfaceRef), fmt::ptr(s_LocalHitman.m_entityRef.GetEntity()),
+            fmt::ptr(s_Spatial)
+        );
+
+        size_t s_BrickCount = 0;
+        bool s_HitmenBrickLoaded = false;
+
+        for (const auto& s_Brick : Globals::Hitman5Module->m_pEntitySceneContext->m_aLoadedBricks)
+        {
+            ++s_BrickCount;
+
+            if (s_Brick.m_RuntimeResourceID == ResId<"[assembly:/_sdk/hitmen.brick].pc_entitytype">)
+                s_HitmenBrickLoaded = true;
+        }
+
+        // The second Hitman is content from hitmen.brick, not something this dll creates.
+        HitmenLog::Info("loaded bricks: {}, hitmen.brick loaded: {}", s_BrickCount, s_HitmenBrickLoaded);
+    }
+    else
+    {
+        m_TransformSampleTimer += static_cast<float>(p_UpdateEvent.m_RealTimeDelta.ToSeconds());
+
+        if (m_TransformSampleTimer < 5.f)
+            return;
+
+        m_TransformSampleTimer = 0.f;
+    }
+
+    // GetObjectToWorldMatrix refreshes the entity's cached world matrix when the engine has marked
+    // it dirty, exactly as it does for every other caller. Nothing is written to the transform.
+    const SMatrix s_Transform = s_Spatial->GetObjectToWorldMatrix();
+
+    HitmenLog::Info(
+        "local transform read: position ({:.3f}, {:.3f}, {:.3f})",
+        s_Transform.Trans.x, s_Transform.Trans.y, s_Transform.Trans.z
+    );
 }
 
 void Hitmen::OnDrawMenu()
@@ -565,6 +633,9 @@ DEFINE_PLUGIN_DETOUR(Hitmen, void, OnClearScene, ZEntitySceneContext* th, bool p
     m_OtherHitman = {};
     m_FirstHitman = {};
     m_SceneLoaded = false;
+
+    m_ObservedLocalPlayer = false;
+    m_ObservedLocalPlayerMissing = false;
 
     HitmenLog::Info("OnClearScene exit: continuing to the original");
     return HookResult<void>(HookAction::Continue());
