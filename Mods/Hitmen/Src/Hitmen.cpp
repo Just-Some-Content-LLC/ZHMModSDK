@@ -364,7 +364,11 @@ void Hitmen::OnDrawMenu()
 
         }
 
-        Logger::Debug("[Hitmen] Local player data: {}", fmt::ptr(Globals::PlayerRegistry->m_pLocalPlayer));
+        Logger::Debug(
+            "[Hitmen] Player data array: {} entries, begin {}",
+            Globals::PlayerRegistry->m_PlayerData.size(),
+            fmt::ptr(Globals::PlayerRegistry->m_PlayerData.m_pBegin)
+        );
 
         auto s_LocalHitman = SDK()->GetLocalPlayer();
 
