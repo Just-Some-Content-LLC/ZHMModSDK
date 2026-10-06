@@ -96,7 +96,10 @@ enum MessageId
     NpcPositions,
 };
 
-
+// H3: the 2023 Hitman transform/input sync is excluded from the dormant build, not ported.
+// Its receive side writes remote transforms and raw input bytes into the game. Kept verbatim
+// as protocol evidence (glacier-relay docs/research/HITMEN_COMPILE_ARCHAEOLOGY.md).
+#if 0
 void Hitmen::ProcessMessages()
 {
     for (const auto& s_Msg : m_Transport->ReceiveMessages())
@@ -130,6 +133,7 @@ void Hitmen::SendInputsAndPosition(HitmenConnection p_Connection)
 
     m_Transport->SendUnreliable(p_Connection, s_Writer.Buffer(), s_Writer.WrittenBytes());
 }
+#endif
 
 void Hitmen::SendNpcPositions(HitmenConnection p_Connection)
 {
@@ -162,6 +166,8 @@ void Hitmen::SendNpcPositions(HitmenConnection p_Connection)
     m_Transport->SendUnreliable(p_Connection, s_Writer.Buffer(), s_Writer.WrittenBytes());
 }
 
+// H3: excluded from the dormant build (see ProcessMessages above).
+#if 0
 void Hitmen::OnInputsAndPosition(BinaryStreamReader& p_Reader)
 {
     const auto& s_Position = p_Reader.Read<SMatrix>();
@@ -191,6 +197,7 @@ void Hitmen::OnInputsAndPosition(BinaryStreamReader& p_Reader)
         }
     }
 }
+#endif
 
 void Hitmen::OnNpcPositions(BinaryStreamReader& p_Reader)
 {
