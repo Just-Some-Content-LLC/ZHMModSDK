@@ -274,14 +274,14 @@ void Hitmen::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
     if (!m_Connected)
         return;*/
 
-    ObserveSceneState();
+    HitmenLog::Guard("ObserveSceneState", [&] { ObserveSceneState(); });
 
     auto s_Scene = Globals::Hitman5Module->m_pEntitySceneContext->m_pScene;
 
     if (!s_Scene || !(*Globals::ApplicationEngineWin32)->m_bSceneLoaded)
         return;
 
-    ObserveLocalPlayer(p_UpdateEvent);
+    HitmenLog::Guard("ObserveLocalPlayer", [&] { ObserveLocalPlayer(p_UpdateEvent); });
 
     if (!m_SceneLoaded)
     {
@@ -581,7 +581,7 @@ void Hitmen::OnDrawMenu()
 {
     if (ImGui::Button("Player registry"))
     {
-        DumpPlayerRegistry("menu button");
+        HitmenLog::Guard("DumpPlayerRegistry (menu button)", [&] { DumpPlayerRegistry("menu button"); });
         Logger::Info("[Hitmen] Player registry dumped to {}", HitmenLog::Path());
     }
 
@@ -651,14 +651,16 @@ void Hitmen::OnDraw3D(IRenderer* p_Renderer)
 
 DEFINE_PLUGIN_DETOUR(Hitmen, bool, OnLoadScene, ZEntitySceneContext* th, SSceneInitParameters& p_SceneData)
 {
-    HitmenLog::Info(
-        "OnLoadScene enter: context {}, scene '{}', type '{}', codename hint '{}', start game {}, {} additional bricks",
-        fmt::ptr(th), p_SceneData.m_SceneResource, p_SceneData.m_Type, p_SceneData.m_CodeNameHint,
-        p_SceneData.m_bStartGame, p_SceneData.m_aAdditionalBrickResources.size()
-    );
+    HitmenLog::Guard("OnLoadScene", [&] {
+        HitmenLog::Info(
+            "OnLoadScene enter: context {}, scene '{}', type '{}', codename hint '{}', start game {}, {} additional bricks",
+            fmt::ptr(th), p_SceneData.m_SceneResource, p_SceneData.m_Type, p_SceneData.m_CodeNameHint,
+            p_SceneData.m_bStartGame, p_SceneData.m_aAdditionalBrickResources.size()
+        );
 
-    for (const auto& s_Brick : p_SceneData.m_aAdditionalBrickResources)
-        HitmenLog::Info("OnLoadScene brick: '{}'", s_Brick);
+        for (const auto& s_Brick : p_SceneData.m_aAdditionalBrickResources)
+            HitmenLog::Info("OnLoadScene brick: '{}'", s_Brick);
+    });
 
     // p_SceneData.m_sceneName = "assembly:/_pro/scenes/users/notex/test.entity";
     //p_SceneData.m_sceneName = "assembly:/_pro/scenes/missions/golden/mission_gecko/scene_gecko_basic.entity";

@@ -124,6 +124,50 @@ void HitmenLog::Write(Level p_Level, std::string_view p_Message)
     WriteLine(p_Level, p_Message, true);
 }
 
+int HitmenLog::LogFault(const char* p_Where, EXCEPTION_POINTERS* p_Info)
+{
+    static volatile LONG s_Logged = 0;
+
+    const auto* s_Record = p_Info->ExceptionRecord;
+
+    // On a stack overflow there is no stack left to format a message with. A fault that some outer
+    // handler resumes from could repeat every frame, so stop reporting after a few.
+    if (s_Record->ExceptionCode == EXCEPTION_STACK_OVERFLOW || InterlockedIncrement(&s_Logged) > 16)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    HMODULE s_Module = nullptr;
+    char s_ModulePath[MAX_PATH] = "unknown module";
+
+    if (GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        static_cast<LPCSTR>(s_Record->ExceptionAddress), &s_Module
+    ))
+    {
+        GetModuleFileNameA(s_Module, s_ModulePath, MAX_PATH);
+    }
+
+    std::string s_Access;
+
+    if (s_Record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && s_Record->NumberParameters >= 2)
+    {
+        const auto s_Kind = s_Record->ExceptionInformation[0];
+
+        s_Access = fmt::format(
+            ", {} address {:#x}",
+            s_Kind == 0 ? "reading" : s_Kind == 1 ? "writing" : "executing", s_Record->ExceptionInformation[1]
+        );
+    }
+
+    Error(
+        "FAULT in {}: exception {:#010x} at {} ('{}' base {}, offset {:#x}){}. Not handled here; it continues to propagate.",
+        p_Where, static_cast<uint32_t>(s_Record->ExceptionCode), fmt::ptr(s_Record->ExceptionAddress), s_ModulePath,
+        fmt::ptr(s_Module),
+        reinterpret_cast<uintptr_t>(s_Record->ExceptionAddress) - reinterpret_cast<uintptr_t>(s_Module), s_Access
+    );
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 std::string HitmenLog::Path()
 {
     AcquireSRWLockExclusive(&g_Lock);

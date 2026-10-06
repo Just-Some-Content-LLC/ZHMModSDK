@@ -1,10 +1,13 @@
 #pragma once
 
+#include <excpt.h>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include "Logging.h"
+
+struct _EXCEPTION_POINTERS;
 
 // Durable log for the Hitmen revival.
 //
@@ -15,7 +18,8 @@
 //
 //   %LOCALAPPDATA%\GlacierRelay\Hitmen\hitmen-<process start, UTC>-<pid>.log
 //
-// It never mutates game state and never handles an exception.
+// It never mutates game state and never handles an exception: Guard only reports a fault that is
+// already on its way out.
 namespace HitmenLog
 {
     enum class Level
@@ -43,6 +47,23 @@ namespace HitmenLog
     void Error(fmt::format_string<Args...> p_Format, Args&&... p_Args)
     {
         Write(Level::Error, fmt::format(p_Format, std::forward<Args>(p_Args)...));
+    }
+
+    // SEH filter for Guard. Logs the exception and always returns EXCEPTION_CONTINUE_SEARCH.
+    int LogFault(const char* p_Where, _EXCEPTION_POINTERS* p_Info);
+
+    // Runs p_Func. If a structured exception (access violation, C++ exception, ...) escapes it, the
+    // fault is logged and then keeps propagating exactly as it would have without the guard.
+    template <typename TFunc>
+    void Guard(const char* p_Where, const TFunc& p_Func)
+    {
+        __try
+        {
+            p_Func();
+        }
+        __except (LogFault(p_Where, GetExceptionInformation()))
+        {
+        }
     }
 
     // Path of the log file as UTF-8, or an empty string if it could not be opened.
