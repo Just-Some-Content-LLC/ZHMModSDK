@@ -7,6 +7,7 @@
 #include <fmt/format.h>
 
 #include "RelayEnvelope.h"
+#include "RelayLog.h"
 
 RelayAdapter::RelayAdapter(std::unique_ptr<IRelaySink> p_Sink, std::string p_InstanceId, Clock p_Clock) :
     m_Sink(std::move(p_Sink)),
@@ -55,6 +56,11 @@ void RelayAdapter::Publish(const MissionPlayingEvent& p_Event)
     s_Published.event_type = s_Envelope.event_type;
     s_Published.sequence = s_Envelope.sequence;
     s_Published.json = RelaySerialization::Envelope(s_Envelope);
+
+    // The complete envelope, logged once at the publication boundary, whatever the sink. This is
+    // the native side of the field-by-field comparison with what BEAM decodes (M1 final run, open
+    // item 1); sinks log only their own delivery outcome.
+    RelayLog::Info("published {} #{}: {}", s_Published.event_type, s_Published.sequence, s_Published.json);
 
     m_Sink->Publish(s_Published);
 }

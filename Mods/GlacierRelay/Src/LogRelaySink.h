@@ -2,7 +2,8 @@
 
 #include "IRelaySink.h"
 
-// Stage 1 sink: writes each envelope to the durable log and nowhere else.
+// The no-network sink: delivers each envelope to the durable log and nowhere else. Since M2 the
+// envelope body itself is logged by RelayAdapter, so this sink adds only a delivery line.
 class LogRelaySink : public IRelaySink
 {
 public:
