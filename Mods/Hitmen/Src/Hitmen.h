@@ -42,6 +42,7 @@ private:
 
     void ObserveSceneState();
     void ObserveLocalPlayer(const SGameUpdateEvent& p_UpdateEvent);
+    void DumpPlayerRegistry(const char* p_Trigger);
 
 private:
     DECLARE_PLUGIN_DETOUR(Hitmen, bool, OnLoadScene, ZEntitySceneContext*, SSceneInitParameters&);

@@ -428,6 +428,8 @@ void Hitmen::ObserveLocalPlayer(const SGameUpdateEvent& p_UpdateEvent)
 
         // The second Hitman is content from hitmen.brick, not something this dll creates.
         HitmenLog::Info("loaded bricks: {}, hitmen.brick loaded: {}", s_BrickCount, s_HitmenBrickLoaded);
+
+        DumpPlayerRegistry("local player resolved");
     }
     else
     {
@@ -449,86 +451,138 @@ void Hitmen::ObserveLocalPlayer(const SGameUpdateEvent& p_UpdateEvent)
     );
 }
 
+// ZStrings in registry slots come from a reverse-engineered layout, so report the raw length and
+// pointer and only read the characters when the length is plausible.
+static std::string DescribeString(const ZString& p_String)
+{
+    if (p_String.size() > 256 || (p_String.size() != 0 && !p_String.c_str()))
+        return fmt::format("<{} chars at {}, not read>", p_String.size(), fmt::ptr(p_String.c_str()));
+
+    return fmt::format("'{}'", p_String.ToStringView());
+}
+
+// Dumps ZPlayerRegistry to the durable log. Read-only.
+void Hitmen::DumpPlayerRegistry(const char* p_Trigger)
+{
+    const auto* s_Registry = Globals::PlayerRegistry;
+
+    HitmenLog::Info("registry: dump begin ({}), ZPlayerRegistry {}", p_Trigger, fmt::ptr(s_Registry));
+
+    if (!s_Registry)
+    {
+        HitmenLog::Error("registry: Globals::PlayerRegistry is null, nothing to dump");
+        return;
+    }
+
+    // What the current SDK models at 0x390, where the 2023 code read m_pLocalPlayer.
+    const auto& s_Players = s_Registry->m_PlayerData;
+
+    HitmenLog::Info(
+        "registry: m_PlayerData {} entries, begin {}, end {}, allocation end {}",
+        s_Players.size(), fmt::ptr(s_Players.m_pBegin), fmt::ptr(s_Players.m_pEnd),
+        fmt::ptr(s_Players.m_pAllocationEnd)
+    );
+
+    // Whether the array is a view over the four inline slots or separate storage is not known.
+    if (s_Players.size() <= 16)
+    {
+        for (size_t i = 0; i < s_Players.size(); ++i)
+        {
+            const auto* s_Entry = &s_Players.m_pBegin[i];
+            const ptrdiff_t s_Slot = s_Entry - &s_Registry->m_aPlayerData[0];
+            const bool s_Inline = s_Entry >= &s_Registry->m_aPlayerData[0] && s_Entry < &s_Registry->m_aPlayerData[4];
+
+            HitmenLog::Info(
+                "registry: m_PlayerData[{}] at {}, inline slot {}",
+                i, fmt::ptr(s_Entry), s_Inline ? std::to_string(s_Slot) : "none (outside m_aPlayerData)"
+            );
+        }
+    }
+    else
+    {
+        HitmenLog::Warn("registry: m_PlayerData size is implausible, entries not walked");
+    }
+
+    for (int i = 0; i < 4; ++i)
+    {
+        const auto& s_Data = s_Registry->m_aPlayerData[i];
+
+        /*
+         * class ZNetPlayerController :
+            public ZBaseReplica
+        {
+        public:
+            void* m_unk0x8; // 0x10 (-8)
+            uint32_t m_nFlags0x10; // 0x18 (-8)
+            void* m_unk0x18; // 0x20 (-8)
+            uint32_t m_nFlags0x20; // 0x28 (-8)
+            void* m_nFlags0x28; // 0x30 (-8)
+            bool m_bUnk0x30; // 0x38 (-8)
+            uint32_t m_nFlags0x34; // 0x3C (-8)
+            uint32_t m_nFlags0x38; // 0x40 (-8)
+            uint32_t m_nFlags0x3C; // 0x44 (-8)
+            uint16_t m_nFlags0x40; // 0x48 (-8)
+            bool m_bUnk0x42; // 0x4A (-8)
+            void* m_unk0x48; // 0x50 (-8)
+            void* m_unk0x50; // 0x58 (-8)
+            void* m_unk0x58; // 0x60 (-8)
+            ZString m_sUnk0x60; // 0x68 (-8)
+            uint32_t m_nFlags0x70; // 0x78 (-8)
+            void* m_unk0x78; // 0x80 (-8)
+            void* m_unk0x80; // 0x88 (-8)
+            ZString m_sPlayerOnlineId; // 0x90 (-8)
+            uint32_t m_nFlags0x98; // 0xA0 (-8)
+            ZEntityRef m_HitmanEntity; // 0xA8 (-8)
+            void* m_unk0xA8; // 0xB0 (-8) a pointer to the entity vtables, probably something related to the aspect dummy
+            void* m_unk0xB0; // 0xB8 (-8)
+            void* m_unk0xB8; // 0xC0 (-8)
+            void* m_unk0xC0; // 0xC8 (-8)
+        };
+         */
+
+        HitmenLog::Info("registry: slot [{}] at {}", i, fmt::ptr(&s_Data));
+        HitmenLog::Info("registry: [{}] player id = {}", i, s_Data.m_nPlayerId);
+        HitmenLog::Info("registry: [{}] counter = {}", i, s_Data.m_Controller.m_nUnkCounter);
+        HitmenLog::Info("registry: [{}] flags 0x18 = {:08X}", i, s_Data.m_Controller.m_nFlags0x10);
+        HitmenLog::Info("registry: [{}] raknet replica = {}", i, fmt::ptr(s_Data.m_Controller.m_pRakNetReplica));
+        HitmenLog::Info("registry: [{}] flags 0x28 = {:08X}", i, s_Data.m_Controller.m_nFlags0x20);
+        HitmenLog::Info("registry: [{}] flags 0x30 = {}", i, fmt::ptr(s_Data.m_Controller.m_nFlags0x28));
+        HitmenLog::Info("registry: [{}] is local player = {}", i, s_Data.m_Controller.m_bLocalPlayer);
+        HitmenLog::Info("registry: [{}] flags 0x3C = {:08X}", i, s_Data.m_Controller.m_nFlags0x34);
+        HitmenLog::Info("registry: [{}] flags 0x40 = {:08X}", i, s_Data.m_Controller.m_nFlags0x38);
+        HitmenLog::Info("registry: [{}] flags 0x44 = {:08X}", i, s_Data.m_Controller.m_nFlags0x3C);
+        HitmenLog::Info("registry: [{}] flags 0x48 = {:04X}", i, s_Data.m_Controller.m_nFlags0x40);
+        HitmenLog::Info("registry: [{}] connected = {}", i, s_Data.m_Controller.m_bConnectedToMultiplayer);
+        HitmenLog::Info("registry: [{}] net player = {}", i, fmt::ptr(s_Data.m_Controller.m_pNetPlayer));
+        HitmenLog::Info("registry: [{}] character id = {}", i, s_Data.m_Controller.m_SelectedCharacterId.ToString());
+        HitmenLog::Info("registry: [{}] string 0x68 = {}", i, DescribeString(s_Data.m_Controller.m_sUnk0x60));
+        HitmenLog::Info("registry: [{}] flags 0x78 = {:08X}", i, s_Data.m_Controller.m_nFlags0x70);
+        HitmenLog::Info("registry: [{}] outfit id = {}", i, s_Data.m_Controller.m_OutfitId.ToString());
+        HitmenLog::Info("registry: [{}] player session id (?) = {}", i, DescribeString(s_Data.m_Controller.s_sSessionId));
+        HitmenLog::Info("registry: [{}] flags 0xA0 = {:08X}", i, s_Data.m_Controller.m_nFlags0x98);
+        HitmenLog::Info("registry: [{}] hitman entity = {}", i, fmt::ptr(s_Data.m_Controller.m_HitmanEntity.GetEntity()));
+        HitmenLog::Info("registry: [{}] entity vtables = {}", i, fmt::ptr(s_Data.m_Controller.m_pEntityVtables));
+        HitmenLog::Info("registry: [{}] unk 0xB8 = {}", i, fmt::ptr(s_Data.m_Controller.m_unk0xB0));
+        HitmenLog::Info("registry: [{}] unk 0xC0 = {}", i, fmt::ptr(s_Data.m_Controller.m_unk0xB8));
+        HitmenLog::Info("registry: [{}] unk 0xC8 = {}", i, fmt::ptr(s_Data.m_Controller.m_unk0xC0));
+    }
+
+    const auto s_LocalHitman = SDK()->GetLocalPlayer();
+
+    HitmenLog::Info(
+        "registry: SDK local player: ZHitman5 {}, entity {}",
+        fmt::ptr(s_LocalHitman.m_pInterfaceRef), fmt::ptr(s_LocalHitman.m_entityRef.GetEntity())
+    );
+
+    HitmenLog::Info("registry: dump end");
+}
+
 void Hitmen::OnDrawMenu()
 {
     if (ImGui::Button("Player registry"))
     {
-        for (int i = 0; i < 4; ++i)
-        {
-            auto& s_Data = Globals::PlayerRegistry->m_aPlayerData[i];
-
-            /*
-             * class ZNetPlayerController :
-                public ZBaseReplica
-            {
-            public:
-                void* m_unk0x8; // 0x10 (-8)
-                uint32_t m_nFlags0x10; // 0x18 (-8)
-                void* m_unk0x18; // 0x20 (-8)
-                uint32_t m_nFlags0x20; // 0x28 (-8)
-                void* m_nFlags0x28; // 0x30 (-8)
-                bool m_bUnk0x30; // 0x38 (-8)
-                uint32_t m_nFlags0x34; // 0x3C (-8)
-                uint32_t m_nFlags0x38; // 0x40 (-8)
-                uint32_t m_nFlags0x3C; // 0x44 (-8)
-                uint16_t m_nFlags0x40; // 0x48 (-8)
-                bool m_bUnk0x42; // 0x4A (-8)
-                void* m_unk0x48; // 0x50 (-8)
-                void* m_unk0x50; // 0x58 (-8)
-                void* m_unk0x58; // 0x60 (-8)
-                ZString m_sUnk0x60; // 0x68 (-8)
-                uint32_t m_nFlags0x70; // 0x78 (-8)
-                void* m_unk0x78; // 0x80 (-8)
-                void* m_unk0x80; // 0x88 (-8)
-                ZString m_sPlayerOnlineId; // 0x90 (-8)
-                uint32_t m_nFlags0x98; // 0xA0 (-8)
-                ZEntityRef m_HitmanEntity; // 0xA8 (-8)
-                void* m_unk0xA8; // 0xB0 (-8) a pointer to the entity vtables, probably something related to the aspect dummy
-                void* m_unk0xB0; // 0xB8 (-8)
-                void* m_unk0xB8; // 0xC0 (-8)
-                void* m_unk0xC0; // 0xC8 (-8)
-            };
-             */
-
-            Logger::Debug("[Hitmen] >>>> [{}] {}", i, fmt::ptr(&s_Data));
-            Logger::Debug("[Hitmen] [{}] player id = {}", i, s_Data.m_nPlayerId);
-            Logger::Debug("[Hitmen] [{}] counter = {}", i, s_Data.m_Controller.m_nUnkCounter);
-            Logger::Debug("[Hitmen] [{}] flags 0x18 = {:08X}", i, s_Data.m_Controller.m_nFlags0x10);
-            Logger::Debug("[Hitmen] [{}] raknet replica = {}", i, fmt::ptr(s_Data.m_Controller.m_pRakNetReplica));
-            Logger::Debug("[Hitmen] [{}] flags 0x28 = {:08X}", i, s_Data.m_Controller.m_nFlags0x20);
-            Logger::Debug("[Hitmen] [{}] flags 0x30 = {}", i, fmt::ptr(s_Data.m_Controller.m_nFlags0x28));
-            Logger::Debug("[Hitmen] [{}] is local player = {}", i, s_Data.m_Controller.m_bLocalPlayer);
-            Logger::Debug("[Hitmen] [{}] flags 0x3C = {:08X}", i, s_Data.m_Controller.m_nFlags0x34);
-            Logger::Debug("[Hitmen] [{}] flags 0x40 = {:08X}", i, s_Data.m_Controller.m_nFlags0x38);
-            Logger::Debug("[Hitmen] [{}] flags 0x44 = {:08X}", i, s_Data.m_Controller.m_nFlags0x3C);
-            Logger::Debug("[Hitmen] [{}] flags 0x48 = {:04X}", i, s_Data.m_Controller.m_nFlags0x40);
-            Logger::Debug("[Hitmen] [{}] connected = {}", i, s_Data.m_Controller.m_bConnectedToMultiplayer);
-            Logger::Debug("[Hitmen] [{}] net player = {}", i, fmt::ptr(s_Data.m_Controller.m_pNetPlayer));
-            Logger::Debug("[Hitmen] [{}] character id = {}", i, s_Data.m_Controller.m_SelectedCharacterId.ToString());
-            Logger::Debug("[Hitmen] [{}] string 0x68 = {}", i, s_Data.m_Controller.m_sUnk0x60);
-            Logger::Debug("[Hitmen] [{}] flags 0x78 = {:08X}", i, s_Data.m_Controller.m_nFlags0x70);
-            Logger::Debug("[Hitmen] [{}] outfit id = {}", i, s_Data.m_Controller.m_OutfitId.ToString());
-            Logger::Debug("[Hitmen] [{}] player session id (?) = {}", i, s_Data.m_Controller.s_sSessionId);
-            Logger::Debug("[Hitmen] [{}] flags 0xA0 = {:08X}", i, s_Data.m_Controller.m_nFlags0x98);
-            Logger::Debug("[Hitmen] [{}] hitman entity = {}", i, fmt::ptr(s_Data.m_Controller.m_HitmanEntity.GetEntity()));
-            Logger::Debug("[Hitmen] [{}] entity vtables = {}", i, fmt::ptr(s_Data.m_Controller.m_pEntityVtables));
-            Logger::Debug("[Hitmen] [{}] unk 0xB8 = {}", i, fmt::ptr(s_Data.m_Controller.m_unk0xB0));
-            Logger::Debug("[Hitmen] [{}] unk 0xC0 = {}", i, fmt::ptr(s_Data.m_Controller.m_unk0xB8));
-            Logger::Debug("[Hitmen] [{}] unk 0xC8 = {}", i, fmt::ptr(s_Data.m_Controller.m_unk0xC0));
-
-        }
-
-        Logger::Debug(
-            "[Hitmen] Player data array: {} entries, begin {}",
-            Globals::PlayerRegistry->m_PlayerData.size(),
-            fmt::ptr(Globals::PlayerRegistry->m_PlayerData.m_pBegin)
-        );
-
-        auto s_LocalHitman = SDK()->GetLocalPlayer();
-
-        Logger::Debug("[Hitmen] Local player: {} (base {})", fmt::ptr(s_LocalHitman.m_pInterfaceRef), fmt::ptr(s_LocalHitman.m_entityRef.GetEntity()));
-
-
+        DumpPlayerRegistry("menu button");
+        Logger::Info("[Hitmen] Player registry dumped to {}", HitmenLog::Path());
     }
 
     if (ImGui::Button("Hitmen"))
