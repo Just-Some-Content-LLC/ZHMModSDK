@@ -250,17 +250,17 @@ void Hitmen::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
 
         for (auto& s_Brick : Globals::Hitman5Module->m_pEntitySceneContext->m_aLoadedBricks)
         {
-            if (s_Brick.runtimeResourceID != ResId<"[assembly:/_sdk/hitmen.brick].pc_entitytype">)
+            if (s_Brick.m_RuntimeResourceID != ResId<"[assembly:/_sdk/hitmen.brick].pc_entitytype">)
                 continue;
 
-            const auto s_BpFactory = reinterpret_cast<ZTemplateEntityBlueprintFactory*>(s_Brick.entityRef.GetBlueprintFactory());
+            const auto s_BpFactory = reinterpret_cast<ZTemplateEntityBlueprintFactory*>(s_Brick.m_EntityRef.GetBlueprintFactory());
 
             if (!s_BpFactory)
                 continue;
 
             if (const auto s_Index = s_BpFactory->GetSubEntityIndex(0xfeede715906f747f); s_Index != -1)
             {
-                m_OtherHitman = s_BpFactory->GetSubEntity(s_Brick.entityRef.m_pEntity, s_Index);
+                m_OtherHitman = s_BpFactory->GetSubEntity(s_Brick.m_EntityRef.m_pEntity, s_Index);
             }
 
             if (m_OtherHitman)
