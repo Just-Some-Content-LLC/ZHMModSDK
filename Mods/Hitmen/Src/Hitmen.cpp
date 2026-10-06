@@ -135,6 +135,10 @@ void Hitmen::SendInputsAndPosition(HitmenConnection p_Connection)
 }
 #endif
 
+// H8: the 2023 NPC position sync is excluded from the dormant build, not ported. It identifies
+// an NPC across machines by its index in ZActorManager::m_aActiveActors, a layout that no longer
+// exists. Kept verbatim as protocol evidence (glacier-relay docs/research/HITMEN_ENTITY_IDENTITY.md).
+#if 0
 void Hitmen::SendNpcPositions(HitmenConnection p_Connection)
 {
     BinaryStreamWriter s_Writer(8192);
@@ -165,6 +169,7 @@ void Hitmen::SendNpcPositions(HitmenConnection p_Connection)
 
     m_Transport->SendUnreliable(p_Connection, s_Writer.Buffer(), s_Writer.WrittenBytes());
 }
+#endif
 
 // H3: excluded from the dormant build (see ProcessMessages above).
 #if 0
@@ -199,6 +204,8 @@ void Hitmen::OnInputsAndPosition(BinaryStreamReader& p_Reader)
 }
 #endif
 
+// H8: excluded from the dormant build (see SendNpcPositions above).
+#if 0
 void Hitmen::OnNpcPositions(BinaryStreamReader& p_Reader)
 {
     const auto s_Actors = p_Reader.Read<uint32_t>();
@@ -220,6 +227,7 @@ void Hitmen::OnNpcPositions(BinaryStreamReader& p_Reader)
         }
     }
 }
+#endif
 
 void Hitmen::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
 {

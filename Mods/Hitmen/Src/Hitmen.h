@@ -29,6 +29,9 @@ private:
     void StartServer(uint16_t p_Port);
     void Connect(const std::string& p_Address, uint16_t p_Port);
     void UpdateConnection();
+
+    // The 2023 sync functions below are declared but their definitions are excluded from the
+    // dormant build (#if 0 in Hitmen.cpp), so any call to them fails at link time.
     void ProcessMessages();
 
     void SendInputsAndPosition(HitmenConnection p_Connection);
