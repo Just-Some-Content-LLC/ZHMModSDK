@@ -24,6 +24,8 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/RelayLog.cpp
         Src/RelayLog.h
         Src/SceneState.h
+        Src/TcpRelaySink.cpp
+        Src/TcpRelaySink.h
 )
 
 set(RELAY_GLACIER_FACING_SOURCES
@@ -55,6 +57,7 @@ add_executable(GlacierRelayTests
         Tests/Main.cpp
         Tests/MissionObserverTests.cpp
         Tests/RelayAdapterTests.cpp
+        Tests/TcpRelaySinkTests.cpp
         Tests/TestHarness.h
 )
 
@@ -64,6 +67,7 @@ target_include_directories(GlacierRelayTests PRIVATE
 
 target_link_libraries(GlacierRelayTests PRIVATE
         fmt::fmt
+        ws2_32
 )
 
 enable_testing()

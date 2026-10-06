@@ -18,6 +18,7 @@ struct _EXCEPTION_POINTERS;
 // file outside the game directory, and goes to OutputDebugString for an attached debugger.
 //
 //   %LOCALAPPDATA%\GlacierRelay\Relay\relay-<process start, UTC>-<pid>.log
+//   (or $GLACIERRELAY_LOG_DIR\relay-...log when that variable is set)
 //
 // This file depends on fmt and Win32 only, never on the SDK, so the engine-independent layers can
 // use it and still be built and tested without SDK headers.

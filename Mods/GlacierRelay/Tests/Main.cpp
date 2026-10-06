@@ -2,11 +2,13 @@
 
 void RunMissionObserverTests();
 void RunRelayAdapterTests();
+void RunTcpRelaySinkTests();
 
 int main()
 {
     RunMissionObserverTests();
     RunRelayAdapterTests();
+    RunTcpRelaySinkTests();
 
     if (g_Failures == 0)
         std::printf("GlacierRelayTests: all checks passed\n");

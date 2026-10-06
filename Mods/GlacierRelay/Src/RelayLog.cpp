@@ -24,16 +24,25 @@ namespace
         g_OpenAttempted = true;
 
         wchar_t s_Dir[MAX_PATH] = {};
-        const DWORD s_Len = GetEnvironmentVariableW(L"LOCALAPPDATA", s_Dir, MAX_PATH);
 
-        if (s_Len == 0 || s_Len >= MAX_PATH)
+        // GLACIERRELAY_LOG_DIR overrides the location (used by the test runner so test logs stay
+        // out of the real directory). Otherwise %LOCALAPPDATA%\GlacierRelay\Relay, then %TEMP%.
+        const DWORD s_OverrideLen = GetEnvironmentVariableW(L"GLACIERRELAY_LOG_DIR", s_Dir, MAX_PATH);
+        const bool s_Override = s_OverrideLen != 0 && s_OverrideLen < MAX_PATH;
+
+        if (!s_Override)
         {
-            const DWORD s_TempLen = GetTempPathW(MAX_PATH, s_Dir);
+            const DWORD s_Len = GetEnvironmentVariableW(L"LOCALAPPDATA", s_Dir, MAX_PATH);
 
-            if (s_TempLen == 0 || s_TempLen >= MAX_PATH)
+            if (s_Len == 0 || s_Len >= MAX_PATH)
             {
-                OutputDebugStringA("[GlacierRelay] durable log unavailable: no LOCALAPPDATA or TEMP directory\n");
-                return;
+                const DWORD s_TempLen = GetTempPathW(MAX_PATH, s_Dir);
+
+                if (s_TempLen == 0 || s_TempLen >= MAX_PATH)
+                {
+                    OutputDebugStringA("[GlacierRelay] durable log unavailable: no LOCALAPPDATA or TEMP directory\n");
+                    return;
+                }
             }
         }
 
@@ -47,16 +56,24 @@ namespace
         }
 
         wchar_t s_Path[MAX_PATH] = {};
+        wchar_t s_LogDir[MAX_PATH] = {};
 
-        swprintf_s(s_Path, L"%s\\GlacierRelay", s_Dir);
-        CreateDirectoryW(s_Path, nullptr);
+        if (s_Override)
+        {
+            wcscpy_s(s_LogDir, s_Dir);
+        }
+        else
+        {
+            swprintf_s(s_Path, L"%s\\GlacierRelay", s_Dir);
+            CreateDirectoryW(s_Path, nullptr);
+            swprintf_s(s_LogDir, L"%s\\GlacierRelay\\Relay", s_Dir);
+        }
 
-        swprintf_s(s_Path, L"%s\\GlacierRelay\\Relay", s_Dir);
-        CreateDirectoryW(s_Path, nullptr);
+        CreateDirectoryW(s_LogDir, nullptr);
 
         swprintf_s(
-            s_Path, L"%s\\GlacierRelay\\Relay\\relay-%04u%02u%02u-%02u%02u%02u-%lu.log",
-            s_Dir, s_Start.wYear, s_Start.wMonth, s_Start.wDay, s_Start.wHour, s_Start.wMinute, s_Start.wSecond,
+            s_Path, L"%s\\relay-%04u%02u%02u-%02u%02u%02u-%lu.log",
+            s_LogDir, s_Start.wYear, s_Start.wMonth, s_Start.wDay, s_Start.wHour, s_Start.wMinute, s_Start.wSecond,
             GetCurrentProcessId()
         );
 

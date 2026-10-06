@@ -10,6 +10,7 @@
 #include "RelayEnvelope.h"
 #include "RelayLog.h"
 #include "SceneObservation.h"
+#include "TcpRelaySink.h"
 
 GlacierRelay::GlacierRelay()
 {
@@ -44,12 +45,36 @@ void GlacierRelay::Init()
 
 void GlacierRelay::OnEngineInitialized()
 {
-    // Stage 1: the only sink is the durable log. The adapter exists before the first frame update.
-    m_Adapter = std::make_unique<RelayAdapter>(
-        std::make_unique<LogRelaySink>(), RelayAdapter::NewInstanceId(), &RelayAdapter::UtcNow
-    );
+    // The sink is chosen by the mod's settings file (Retail/mods/glacierrelay.ini):
+    //   [relay] sink = tcp | log      (default tcp)
+    //   [relay] port = 4747           (loopback only; the host is not configurable)
+    // The adapter exists before the first frame update.
+    const ZString s_SinkName = GetSetting("relay", "sink", "tcp");
+    std::unique_ptr<IRelaySink> s_Sink;
 
-    RelayLog::Info("adapter instance {}, sink LogRelaySink, protocol version {}", m_Adapter->InstanceId(), RelayProtocol::k_ProtocolVersion);
+    if (s_SinkName == "log")
+    {
+        s_Sink = std::make_unique<LogRelaySink>();
+    }
+    else
+    {
+        TcpRelaySink::Options s_Options;
+        const auto s_Port = GetSettingInt("relay", "port", s_Options.port);
+
+        if (s_Port > 0 && s_Port <= 65535)
+            s_Options.port = static_cast<uint16_t>(s_Port);
+        else
+            RelayLog::Warn("relay port setting {} is out of range; using {}", s_Port, s_Options.port);
+
+        s_Sink = std::make_unique<TcpRelaySink>(s_Options);
+    }
+
+    m_Adapter = std::make_unique<RelayAdapter>(std::move(s_Sink), RelayAdapter::NewInstanceId(), &RelayAdapter::UtcNow);
+
+    RelayLog::Info(
+        "adapter instance {}, sink {}, protocol version {}",
+        m_Adapter->InstanceId(), s_SinkName == "log" ? "LogRelaySink" : "TcpRelaySink", RelayProtocol::k_ProtocolVersion
+    );
 
     const ZMemberDelegate<GlacierRelay, void(const SGameUpdateEvent&)> s_Delegate(this, &GlacierRelay::OnFrameUpdate);
     Globals::GameLoopManager->RegisterFrameUpdate(s_Delegate, 1, EUpdateMode::eUpdateAlways);
