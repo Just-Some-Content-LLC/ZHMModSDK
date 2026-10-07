@@ -6,8 +6,10 @@
 // Steps: "stage1" replays the scene sequence recorded in the M1 stage 1 runtime experiment
 // through MissionObserver (since M2: 6 events, a mission.playing/mission.stopped pair per mission
 // entry); "publish" publishes one mission.playing directly; "stop" publishes one mission.stopped
-// directly; "sleep:<ms>" waits. Exit code is 0 when the adapter's sequence count matches what was
-// asked.
+// directly; "b1" replays the 16 recorded B0 actor outcomes through the normalizer; "b2" replays
+// the contract lifecycle order observed in B0 and B1 (fresh load, restart, exit to menu) through
+// the production frame sequencing with the recorded ContractStart/ContractFailed payloads;
+// "sleep:<ms>" waits. Exit code is 0 when the adapter's sequence count matches what was asked.
 
 #include <cstdio>
 #include <cstdlib>
@@ -16,11 +18,14 @@
 #include <vector>
 
 #include "Fixtures/B0ActorOutcomes.h"
+#include "Fixtures/B0ContractLifecycle.h"
 #include "MissionObserver.h"
 #include "RelayAdapter.h"
+#include "RelayFrame.h"
 #include "RelayLog.h"
 #include "TcpRelaySink.h"
 #include "TelemetryNormalizer.h"
+#include "TelemetryQueue.h"
 #include "TestJson.h"
 
 namespace
@@ -74,6 +79,76 @@ namespace
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         }
+
+        return s_Published;
+    }
+}
+
+namespace
+{
+    // M2 B2. One contract session per attempt, in the order the engine emitted them relative to
+    // the mission predicate in B0 and B1 (design section 27.3):
+    //   fresh load:   ContractStart(A) ... rise          -> contract.started, mission.playing
+    //   in attempt:   Kill                                -> actor.died
+    //   restart:      ContractFailed(A, restart) ... fall -> contract.ended, mission.stopped
+    //                 rise, ContractStart(B) same frame  -> mission.playing, contract.started
+    //   exit to menu: fall, ContractFailed(B, exit)      -> mission.stopped, contract.ended
+    // The registry slot behaviour seen on the edges is reproduced too: the restart fall already
+    // carries B's id, the exit fall carries B's id, each rise carries its own session's id.
+    int ReplayB2(RelayAdapter& p_Adapter)
+    {
+        const char* s_Paris = "assembly:/_PRO/Scenes/Missions/Paris/_Scene_FashionShowHit_01.entity";
+        const char* s_Menu = "assembly:/_PRO/Scenes/Frontend/MainMenu.entity";
+        const char* s_SessionA = "2516109628137904204-c00b2d17-08b1-4949-9f9d-5f68b691f40f";
+        const char* s_SessionB = "2516109618691980006-9666b5ad-6a4f-44bb-b5fb-ff86bb3a8d76";
+
+        TelemetryQueue s_Queue(256);
+        TelemetryNormalizer s_Normalizer;
+        MissionObserver s_Observer;
+        int s_Published = 0;
+
+        auto s_Frame = [&](const SceneState& p_Scene, const char* p_SessionId) {
+            std::optional<std::string> s_SessionId;
+            if (p_SessionId)
+                s_SessionId = p_SessionId;
+
+            const auto s_Result = RelayFrame::Process(
+                s_Queue, s_Normalizer, s_Observer, &p_Adapter, p_Scene, s_SessionId,
+                [](const std::string& p_Line) { std::printf("b2: %s\n", p_Line.c_str()); }
+            );
+
+            const int s_Count = static_cast<int>(s_Result.outcomes_published + s_Result.ungated_published + (s_Result.edge_published ? 1 : 0));
+            s_Published += s_Count;
+
+            if (s_Count)
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        };
+
+        auto s_Capture = [&](const char* p_Json, uint32_t p_Index) {
+            s_Queue.Push(TestJson::ObservationFromRecordedEvent(p_Json, p_Index));
+        };
+
+        const auto& s_Contract = B0Fixtures::k_ContractLifecycle;
+
+        s_Frame(Scene("", 8, true, s_Menu, ""), nullptr);
+        s_Frame(Scene("mission", 5, false, s_Paris, "Peacock"), nullptr);
+        s_Capture(s_Contract[B0Fixtures::k_ContractStartA].json, 2);           // emitted during loading
+        s_Frame(Scene("mission", 7, false, s_Paris, "Peacock"), nullptr);      // drains: contract.started
+        s_Frame(Scene("mission", 8, true, s_Paris, "Peacock"), s_SessionA);    // rise: mission.playing
+        s_Capture(B0Fixtures::k_ActorOutcomes[3].json, 36);                    // Kill Ducloitre
+        s_Frame(Scene("mission", 8, true, s_Paris, "Peacock"), nullptr);       // drains: actor.died
+        s_Capture(s_Contract[B0Fixtures::k_ContractFailedRestartA].json, 154); // ~1.9 s before the fall
+        s_Frame(Scene("mission", 8, true, s_Paris, "Peacock"), nullptr);       // drains: contract.ended (restart)
+        s_Frame(Scene("mission", 8, false, s_Paris, "Peacock"), s_SessionB);   // fall: mission.stopped
+        s_Frame(Scene("mission", 0, false, s_Paris, "Peacock"), nullptr);
+        s_Frame(Scene("mission", 7, false, s_Paris, "Peacock"), nullptr);
+        s_Frame(Scene("mission", 8, true, s_Paris, "Peacock"), s_SessionB);    // rise: mission.playing
+        s_Capture(s_Contract[B0Fixtures::k_ContractStartB].json, 156);         // same engine frame, after the rise
+        s_Frame(Scene("mission", 8, true, s_Paris, "Peacock"), nullptr);       // drains: contract.started
+        s_Frame(Scene("mission", 8, false, s_Paris, "Peacock"), s_SessionB);   // fall: mission.stopped
+        s_Capture(s_Contract[B0Fixtures::k_ContractFailedExitB].json, 169);    // same engine frame, after the fall
+        s_Frame(Scene("mission", 2, false, s_Paris, "Peacock"), nullptr);      // drains: contract.ended (exit)
+        s_Frame(Scene("", 8, true, s_Menu, ""), nullptr);
 
         return s_Published;
     }
@@ -136,6 +211,10 @@ int main(int p_Argc, char** p_Argv)
                 ++s_Expected;
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
+        }
+        else if (s_Step == "b2")
+        {
+            s_Expected += ReplayB2(s_Adapter);
         }
         else if (s_Step == "stop")
         {
