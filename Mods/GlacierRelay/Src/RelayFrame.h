@@ -20,12 +20,19 @@
 //     ... actor.died / actor.pacified #N, mission.stopped #(N+1)
 //
 // Reversing the two steps would turn terminal telemetry into unattributed observations.
+//
+// M2 B2: the normalizer's table says per source event whether publication is gated on the
+// predicate. Attempt-gated events (actor outcomes) follow the rule above. Ungated events (contract
+// lifecycle) publish whenever captured and valid, in the same drain and the same sequence, because
+// Glacier emits them before the rise and after the fall (design section 27.3); the plugin reports
+// the occurrence and BEAM correlates it. No grace window, no attachment here.
 namespace RelayFrame
 {
     struct Result
     {
-        size_t outcomes_published = 0;
-        size_t outside_attempt = 0; // normalized, but no attempt was open: not published
+        size_t outcomes_published = 0; // attempt-gated events published
+        size_t ungated_published = 0;  // ungated events published (contract lifecycle)
+        size_t outside_attempt = 0;    // attempt-gated and normalized, but no attempt was open: not published
         size_t malformed = 0;
         bool playing_before = false;
         bool playing_after = false;

@@ -63,6 +63,7 @@ find_package(fmt CONFIG REQUIRED)
 add_executable(GlacierRelayTests
         ${RELAY_ENGINE_INDEPENDENT_SOURCES}
         Tests/Main.cpp
+        Tests/ContractLifecycleTests.cpp
         Tests/MissionObserverTests.cpp
         Tests/RelayAdapterTests.cpp
         Tests/RelayFrameTests.cpp
@@ -72,6 +73,7 @@ add_executable(GlacierRelayTests
         Tests/TestHarness.h
         Tests/TestJson.h
         Tests/Fixtures/B0ActorOutcomes.h
+        Tests/Fixtures/B0ContractLifecycle.h
 )
 
 target_include_directories(GlacierRelayTests PRIVATE

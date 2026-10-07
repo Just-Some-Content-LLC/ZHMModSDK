@@ -76,7 +76,8 @@ private:
     TelemetryQueue m_TelemetryQueue{256};
     TelemetryNormalizer m_Normalizer;
     IntakeCounters m_Intake;
-    uint64_t m_OutsideAttempt = 0;     // normalized events observed with no open attempt (dropped)
+    uint64_t m_OutsideAttempt = 0;     // attempt-gated events observed with no open attempt (dropped)
+    uint64_t m_UngatedPublished = 0;   // ungated (contract lifecycle) events published, any predicate state
     uint64_t m_DropsLogged = 0;        // queue drops already reported
     uint64_t m_DropWarnings = 0;
 };

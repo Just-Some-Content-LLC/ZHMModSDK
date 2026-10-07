@@ -191,6 +191,7 @@ void GlacierRelay::ObserveFrame()
     );
 
     m_OutsideAttempt += s_Frame.outside_attempt;
+    m_UngatedPublished += s_Frame.ungated_published;
 
     if (s_Frame.playing_before != s_Frame.playing_after)
     {
@@ -228,10 +229,10 @@ void GlacierRelay::LogTelemetryCounters(const char* p_Reason)
 
     RelayLog::Info(
         "telemetry counters ({}): seen {}, captured {}, unsupported {}, dont_send {}, unreadable {}, truncated {}; "
-        "queue pushed {}, dropped {}; normalized {}, malformed {}, outside attempt {}",
+        "queue pushed {}, dropped {}; normalized {}, malformed {}, outside attempt {}, ungated published {}",
         p_Reason, m_Intake.seen.load(), m_Intake.captured.load(), m_Intake.unsupported.load(), m_Intake.dont_send.load(),
         m_Intake.unreadable.load(), m_Intake.truncated.load(), s_Queue.pushed, s_Queue.dropped, s_Norm.normalized,
-        s_Norm.malformed, m_OutsideAttempt
+        s_Norm.malformed, m_OutsideAttempt, m_UngatedPublished
     );
 }
 

@@ -35,7 +35,7 @@ RelayFrame::Result RelayFrame::Process(
                 continue;
         }
 
-        if (!p_Observer.Playing())
+        if (s_Normalized.gating == TelemetryNormalizer::Gating::AttemptGated && !p_Observer.Playing())
         {
             ++s_Result.outside_attempt;
             p_Warn(fmt::format(
@@ -51,8 +51,21 @@ RelayFrame::Result RelayFrame::Process(
             continue;
         }
 
-        p_Adapter->Publish(*s_Normalized.event);
-        ++s_Result.outcomes_published;
+        if (s_Normalized.event)
+        {
+            p_Adapter->Publish(*s_Normalized.event);
+            ++s_Result.outcomes_published;
+        }
+        else if (s_Normalized.contract_started)
+        {
+            p_Adapter->Publish(*s_Normalized.contract_started);
+            ++s_Result.ungated_published;
+        }
+        else if (s_Normalized.contract_ended)
+        {
+            p_Adapter->Publish(*s_Normalized.contract_ended);
+            ++s_Result.ungated_published;
+        }
     }
 
     // Step 2: this frame's scene observation and, if the predicate moved, its edge.
