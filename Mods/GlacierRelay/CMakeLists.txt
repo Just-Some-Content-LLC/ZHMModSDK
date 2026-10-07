@@ -21,6 +21,8 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/RelayEnvelope.cpp
         Src/RelayEnvelope.h
         Src/RelayEvent.h
+        Src/RelayFrame.cpp
+        Src/RelayFrame.h
         Src/RelayLog.cpp
         Src/RelayLog.h
         Src/SceneState.h
@@ -63,6 +65,7 @@ add_executable(GlacierRelayTests
         Tests/Main.cpp
         Tests/MissionObserverTests.cpp
         Tests/RelayAdapterTests.cpp
+        Tests/RelayFrameTests.cpp
         Tests/TcpRelaySinkTests.cpp
         Tests/TelemetryNormalizerTests.cpp
         Tests/TelemetryQueueTests.cpp

@@ -12,6 +12,7 @@
 #include "RelayLog.h"
 #include "SceneObservation.h"
 #include "TcpRelaySink.h"
+#include "RelayFrame.h"
 #include "TelemetryIntake.h"
 
 GlacierRelay::GlacierRelay()
@@ -143,13 +144,13 @@ void GlacierRelay::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
     RelayLog::Guard("ObserveFrame", [&] { ObserveFrame(); });
 }
 
-// One observation per frame. Telemetry queued since the last frame is drained first, while the
-// predicate still reflects the previous frame, so an outcome recorded in the frame of a fall is
-// attributed to the attempt it happened in; then the scene is read and a lifecycle edge, if any,
-// is published.
+// One observation per frame. The order inside RelayFrame::Process is a contract: telemetry
+// queued since the last frame is drained and published against the attempt state that was
+// authoritative when it was captured, and only then is this frame's scene observation fed to the
+// mission observer and its edge published. See RelayFrame.h.
 void GlacierRelay::ObserveFrame()
 {
-    DrainTelemetry();
+    ReportQueueDrops();
 
     const SceneState s_Scene = SceneObservation::ObserveScene();
 
@@ -161,10 +162,10 @@ void GlacierRelay::ObserveFrame()
             RelayLog::Error("scene state unavailable: scene context or application engine global is null");
         }
 
-        return;
+        // As before B1: no scene observation this frame; the observer keeps its state. Queued
+        // telemetry is still judged against it below.
     }
-
-    if (s_Scene != m_LastScene)
+    else if (s_Scene != m_LastScene)
     {
         RelayLog::Info(
             "scene: loaded {}, stage {}, type '{}', hint '{}', resource '{}'",
@@ -180,92 +181,43 @@ void GlacierRelay::ObserveFrame()
     // every frame.
     std::optional<std::string> s_GameSessionId;
 
-    if (m_MissionObserver.Playing() != MissionObserver::IsMissionPlaying(s_Scene))
+    if (s_Scene.available && m_MissionObserver.Playing() != MissionObserver::IsMissionPlaying(s_Scene))
         s_GameSessionId = SceneObservation::ObserveGameSessionId();
 
-    const bool s_WasPlaying = m_MissionObserver.Playing();
-    const auto s_Event = m_MissionObserver.Update(s_Scene, s_GameSessionId);
+    const auto s_Frame = RelayFrame::Process(
+        m_TelemetryQueue, m_Normalizer, m_MissionObserver, m_Adapter.get(),
+        s_Scene.available ? std::optional<SceneState>(s_Scene) : std::nullopt, s_GameSessionId,
+        [](const std::string& p_Line) { RelayLog::Warn("{}", p_Line); }
+    );
 
-    if (m_MissionObserver.Playing() != s_WasPlaying)
+    m_OutsideAttempt += s_Frame.outside_attempt;
+
+    if (s_Frame.playing_before != s_Frame.playing_after)
     {
-        RelayLog::Info("mission playing: {} -> {}", s_WasPlaying, m_MissionObserver.Playing());
+        RelayLog::Info("mission playing: {} -> {}", s_Frame.playing_before, s_Frame.playing_after);
 
-        if (!m_MissionObserver.Playing())
+        if (!s_Frame.playing_after)
             LogTelemetryCounters("attempt ended");
     }
-
-    if (!s_Event)
-        return;
-
-    if (!m_Adapter)
-    {
-        RelayLog::Error("mission lifecycle edge observed before the adapter existed; event dropped");
-        return;
-    }
-
-    m_Adapter->Publish(*s_Event);
 }
 
-// Frame thread: normalize what the detour queued and publish while an attempt is open. An outcome
-// with no open attempt is not attached to any attempt: it is logged and counted (M2 design,
-// Part B, attempt association), never published as belonging to a neighbour.
-void GlacierRelay::DrainTelemetry()
+// Queue drops are counted by the detour side; they are reported here, on the frame thread, with a
+// rate limit.
+void GlacierRelay::ReportQueueDrops()
 {
-    const auto s_Queued = m_TelemetryQueue.Drain();
-
     const auto s_Stats = m_TelemetryQueue.GetStats();
 
-    if (s_Stats.dropped > m_DropsLogged)
+    if (s_Stats.dropped <= m_DropsLogged)
+        return;
+
+    if (m_DropWarnings < 8 || (s_Stats.dropped - m_DropsLogged) >= 100)
     {
-        if (m_DropWarnings < 8 || (s_Stats.dropped - m_DropsLogged) >= 100)
-        {
-            RelayLog::Warn(
-                "telemetry queue full: {} observation(s) dropped so far (capacity {})", s_Stats.dropped,
-                m_TelemetryQueue.Capacity()
-            );
-            ++m_DropWarnings;
-            m_DropsLogged = s_Stats.dropped;
-        }
-    }
-
-    for (const auto& s_Observation : s_Queued)
-    {
-        const auto s_Result = m_Normalizer.Normalize(s_Observation);
-
-        switch (s_Result.outcome)
-        {
-            case TelemetryNormalizer::Outcome::Normalized:
-                break;
-            case TelemetryNormalizer::Outcome::Malformed:
-                RelayLog::Warn(
-                    "telemetry '{}' (index {}) not normalized: {}", s_Observation.name, s_Observation.event_index,
-                    s_Result.detail
-                );
-                continue;
-            case TelemetryNormalizer::Outcome::Unsupported:
-            case TelemetryNormalizer::Outcome::DontSend:
-                // The intake filters these before queueing; counted again here only if that ever
-                // disagrees with the normalizer's table.
-                continue;
-        }
-
-        if (!m_MissionObserver.Playing())
-        {
-            ++m_OutsideAttempt;
-            RelayLog::Warn(
-                "telemetry '{}' (index {}) observed with no open mission attempt; not published (total {})",
-                s_Observation.name, s_Observation.event_index, m_OutsideAttempt
-            );
-            continue;
-        }
-
-        if (!m_Adapter)
-        {
-            RelayLog::Error("telemetry '{}' observed before the adapter existed; dropped", s_Observation.name);
-            continue;
-        }
-
-        m_Adapter->Publish(*s_Result.event);
+        RelayLog::Warn(
+            "telemetry queue full: {} observation(s) dropped so far (capacity {})", s_Stats.dropped,
+            m_TelemetryQueue.Capacity()
+        );
+        ++m_DropWarnings;
+        m_DropsLogged = s_Stats.dropped;
     }
 }
 

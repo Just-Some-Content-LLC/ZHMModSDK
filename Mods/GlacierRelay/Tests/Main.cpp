@@ -5,6 +5,7 @@ void RunRelayAdapterTests();
 void RunTcpRelaySinkTests();
 void RunTelemetryNormalizerTests();
 void RunTelemetryQueueTests();
+void RunRelayFrameTests();
 
 int main()
 {
@@ -12,6 +13,7 @@ int main()
     RunRelayAdapterTests();
     RunTelemetryNormalizerTests();
     RunTelemetryQueueTests();
+    RunRelayFrameTests();
     RunTcpRelaySinkTests();
 
     if (g_Failures == 0)

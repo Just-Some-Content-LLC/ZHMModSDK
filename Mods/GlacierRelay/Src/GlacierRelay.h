@@ -38,7 +38,7 @@ public:
 private:
     void OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent);
     void ObserveFrame();
-    void DrainTelemetry();
+    void ReportQueueDrops();
     void LogTelemetryCounters(const char* p_Reason);
 
     DECLARE_PLUGIN_DETOUR(
