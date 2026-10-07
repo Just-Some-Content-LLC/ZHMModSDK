@@ -1,6 +1,7 @@
 #include "GlacierRelay.h"
 
 #include "Globals.h"
+#include "Hooks.h"
 #include "Logging.h"
 #include "ModSDKVersion.h"
 #include "Glacier/SGameUpdateEvent.h"
@@ -11,6 +12,7 @@
 #include "RelayLog.h"
 #include "SceneObservation.h"
 #include "TcpRelaySink.h"
+#include "TelemetryIntake.h"
 
 GlacierRelay::GlacierRelay()
 {
@@ -40,14 +42,17 @@ GlacierRelay::~GlacierRelay()
 
 void GlacierRelay::Init()
 {
-    RelayLog::Info("Init: no hooks registered (the adapter only polls engine state)");
+    // The one hook: read-only, log-and-continue, on the engine's own telemetry stream (ADR 0006).
+    Hooks::ZAchievementManagerSimple_OnEventSent->AddDetour(this, &GlacierRelay::OnTelemetryEventSent);
+    RelayLog::Info("Init: one detour registered (ZAchievementManagerSimple_OnEventSent, read-only); lifecycle is polled");
 }
 
 void GlacierRelay::OnEngineInitialized()
 {
     // The sink is chosen by the mod's settings file (Retail/mods/glacierrelay.ini):
-    //   [relay] sink = tcp | log      (default tcp)
-    //   [relay] port = 4747           (loopback only; the host is not configurable)
+    //   [relay] sink = tcp | log            (default tcp)
+    //   [relay] port = 4747                 (loopback only; the host is not configurable)
+    //   [relay] telemetry_log = names | off (default names: one line per telemetry event seen)
     // The adapter exists before the first frame update.
     const ZString s_SinkName = GetSetting("relay", "sink", "tcp");
     std::unique_ptr<IRelaySink> s_Sink;
@@ -69,11 +74,15 @@ void GlacierRelay::OnEngineInitialized()
         s_Sink = std::make_unique<TcpRelaySink>(s_Options);
     }
 
+    const ZString s_TelemetryLog = GetSetting("relay", "telemetry_log", "names");
+    m_TelemetryLog = s_TelemetryLog == "off" ? TelemetryLog::Off : TelemetryLog::Names;
+
     m_Adapter = std::make_unique<RelayAdapter>(std::move(s_Sink), RelayAdapter::NewInstanceId(), &RelayAdapter::UtcNow);
 
     RelayLog::Info(
-        "adapter instance {}, sink {}, protocol version {}",
-        m_Adapter->InstanceId(), s_SinkName == "log" ? "LogRelaySink" : "TcpRelaySink", RelayProtocol::k_ProtocolVersion
+        "adapter instance {}, sink {}, protocol version {}, telemetry queue {} , telemetry_log {}",
+        m_Adapter->InstanceId(), s_SinkName == "log" ? "LogRelaySink" : "TcpRelaySink", RelayProtocol::k_ProtocolVersion,
+        m_TelemetryQueue.Capacity(), m_TelemetryLog == TelemetryLog::Off ? "off" : "names"
     );
 
     const ZMemberDelegate<GlacierRelay, void(const SGameUpdateEvent&)> s_Delegate(this, &GlacierRelay::OnFrameUpdate);
@@ -83,15 +92,65 @@ void GlacierRelay::OnEngineInitialized()
     RelayLog::Info("OnEngineInitialized: frame update registered (priority 1, eUpdateAlways)");
 }
 
+// The detour. Minimum work on the engine's thread: read the name and the policy flag, copy the
+// bounded subset for supported events into owned memory, enqueue, continue. No normalization,
+// serialization, logging of bodies or network work happens here.
+DEFINE_PLUGIN_DETOUR(
+    GlacierRelay, void, OnTelemetryEventSent, ZAchievementManagerSimple* th, uint32_t eventIndex,
+    const ZDynamicObject& event
+)
+{
+    RelayLog::Guard("OnTelemetryEventSent", [&] {
+        ++m_Intake.seen;
+
+        TelemetryObservation s_Observation;
+        const auto s_Inspection = TelemetryIntake::Inspect(event, eventIndex, s_Observation);
+
+        switch (s_Inspection.decision)
+        {
+            case TelemetryIntake::Decision::Captured:
+                ++m_Intake.captured;
+                if (s_Inspection.truncated)
+                    ++m_Intake.truncated;
+                m_TelemetryQueue.Push(std::move(s_Observation)); // a full queue counts the drop itself
+                break;
+            case TelemetryIntake::Decision::Unsupported:
+                ++m_Intake.unsupported;
+                break;
+            case TelemetryIntake::Decision::DontSend:
+                ++m_Intake.dont_send;
+                break;
+            case TelemetryIntake::Decision::Unreadable:
+                ++m_Intake.unreadable;
+                break;
+        }
+
+        if (m_TelemetryLog == TelemetryLog::Names)
+        {
+            const char* s_Decision = s_Inspection.decision == TelemetryIntake::Decision::Captured ? "captured"
+                : s_Inspection.decision == TelemetryIntake::Decision::Unsupported ? "unsupported"
+                : s_Inspection.decision == TelemetryIntake::Decision::DontSend ? "dont_send"
+                : "unreadable";
+            RelayLog::Info("telemetry seen (index {}): '{}' -> {}", eventIndex, s_Inspection.name, s_Decision);
+        }
+    });
+
+    return HookResult<void>(HookAction::Continue());
+}
+
 void GlacierRelay::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent)
 {
     RelayLog::Guard("ObserveFrame", [&] { ObserveFrame(); });
 }
 
-// One observation per frame: read scene state, log changes, feed the semantic layer, publish on
-// either edge of the mission predicate (mission.playing on the rise, mission.stopped on the fall).
+// One observation per frame. Telemetry queued since the last frame is drained first, while the
+// predicate still reflects the previous frame, so an outcome recorded in the frame of a fall is
+// attributed to the attempt it happened in; then the scene is read and a lifecycle edge, if any,
+// is published.
 void GlacierRelay::ObserveFrame()
 {
+    DrainTelemetry();
+
     const SceneState s_Scene = SceneObservation::ObserveScene();
 
     if (!s_Scene.available)
@@ -116,9 +175,9 @@ void GlacierRelay::ObserveFrame()
         m_LastScene = s_Scene;
     }
 
-    // The session id is observational payload. It is read only on a frame an edge will fire (either
-    // direction), so the registry is not touched every frame. What it holds on the fall frame is
-    // one of the things the Stage A run is meant to show.
+    // The session id is observational payload (it is Glacier's ContractSessionId, M2 design
+    // section 19). It is read only on a frame an edge will fire, so the registry is not touched
+    // every frame.
     std::optional<std::string> s_GameSessionId;
 
     if (m_MissionObserver.Playing() != MissionObserver::IsMissionPlaying(s_Scene))
@@ -128,7 +187,12 @@ void GlacierRelay::ObserveFrame()
     const auto s_Event = m_MissionObserver.Update(s_Scene, s_GameSessionId);
 
     if (m_MissionObserver.Playing() != s_WasPlaying)
+    {
         RelayLog::Info("mission playing: {} -> {}", s_WasPlaying, m_MissionObserver.Playing());
+
+        if (!m_MissionObserver.Playing())
+            LogTelemetryCounters("attempt ended");
+    }
 
     if (!s_Event)
         return;
@@ -140,6 +204,83 @@ void GlacierRelay::ObserveFrame()
     }
 
     m_Adapter->Publish(*s_Event);
+}
+
+// Frame thread: normalize what the detour queued and publish while an attempt is open. An outcome
+// with no open attempt is not attached to any attempt: it is logged and counted (M2 design,
+// Part B, attempt association), never published as belonging to a neighbour.
+void GlacierRelay::DrainTelemetry()
+{
+    const auto s_Queued = m_TelemetryQueue.Drain();
+
+    const auto s_Stats = m_TelemetryQueue.GetStats();
+
+    if (s_Stats.dropped > m_DropsLogged)
+    {
+        if (m_DropWarnings < 8 || (s_Stats.dropped - m_DropsLogged) >= 100)
+        {
+            RelayLog::Warn(
+                "telemetry queue full: {} observation(s) dropped so far (capacity {})", s_Stats.dropped,
+                m_TelemetryQueue.Capacity()
+            );
+            ++m_DropWarnings;
+            m_DropsLogged = s_Stats.dropped;
+        }
+    }
+
+    for (const auto& s_Observation : s_Queued)
+    {
+        const auto s_Result = m_Normalizer.Normalize(s_Observation);
+
+        switch (s_Result.outcome)
+        {
+            case TelemetryNormalizer::Outcome::Normalized:
+                break;
+            case TelemetryNormalizer::Outcome::Malformed:
+                RelayLog::Warn(
+                    "telemetry '{}' (index {}) not normalized: {}", s_Observation.name, s_Observation.event_index,
+                    s_Result.detail
+                );
+                continue;
+            case TelemetryNormalizer::Outcome::Unsupported:
+            case TelemetryNormalizer::Outcome::DontSend:
+                // The intake filters these before queueing; counted again here only if that ever
+                // disagrees with the normalizer's table.
+                continue;
+        }
+
+        if (!m_MissionObserver.Playing())
+        {
+            ++m_OutsideAttempt;
+            RelayLog::Warn(
+                "telemetry '{}' (index {}) observed with no open mission attempt; not published (total {})",
+                s_Observation.name, s_Observation.event_index, m_OutsideAttempt
+            );
+            continue;
+        }
+
+        if (!m_Adapter)
+        {
+            RelayLog::Error("telemetry '{}' observed before the adapter existed; dropped", s_Observation.name);
+            continue;
+        }
+
+        m_Adapter->Publish(*s_Result.event);
+    }
+}
+
+void GlacierRelay::LogTelemetryCounters(const char* p_Reason)
+{
+    const auto& s_Norm = m_Normalizer.GetCounters();
+    const auto s_Queue = m_TelemetryQueue.GetStats();
+
+    RelayLog::Info(
+        "telemetry counters ({}): seen {}, captured {}, unsupported {}, dont_send {}, unreadable {}, truncated {}; "
+        "queue pushed {}, dropped {}; normalized {}, malformed {}, outside attempt {}",
+        p_Reason, m_Intake.seen.load(), m_Intake.captured.load(), m_Intake.unsupported.load(), m_Intake.dont_send.load(),
+        m_Intake.unreadable.load(), m_Intake.truncated.load(), s_Queue.pushed, s_Queue.dropped, s_Norm.normalized,
+        s_Norm.malformed, m_OutsideAttempt
+    );
 }
 
 DEFINE_ZHM_PLUGIN(GlacierRelay);
