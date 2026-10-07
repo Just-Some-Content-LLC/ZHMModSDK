@@ -65,6 +65,41 @@ std::string RelaySerialization::ActorOutcomePayloadJson(const ActorOutcomeEvent&
     return s_Json;
 }
 
+std::string RelaySerialization::ContractStartedPayloadJson(const ContractStartedEvent& p_Event)
+{
+    std::string s_Json = fmt::format(
+        "{{\"source\":{},\"engine_event\":{},\"contract_session_id\":{},\"contract_id\":{},\"location_id\":{},"
+        "\"contract_type\":{},\"difficulty_level\":{},\"starting_disguise_repository_id\":{},\"is_hitman_suit\":{}",
+        Json::Quote(RelayEvents::k_SourceEngineTelemetry), Json::Quote(p_Event.engine_event),
+        Json::Quote(p_Event.contract_session_id), Json::Quote(p_Event.contract_id), Json::Quote(p_Event.location_id),
+        Json::Quote(p_Event.contract_type), p_Event.difficulty_level, Json::Quote(p_Event.starting_disguise_repository_id),
+        p_Event.is_hitman_suit ? "true" : "false"
+    );
+
+    if (p_Event.engine_timestamp_s)
+        s_Json += fmt::format(",\"engine_timestamp_s\":{}", *p_Event.engine_timestamp_s);
+
+    s_Json += "}";
+    return s_Json;
+}
+
+std::string RelaySerialization::ContractEndedPayloadJson(const ContractEndedEvent& p_Event)
+{
+    std::string s_Json = fmt::format(
+        "{{\"source\":{},\"engine_event\":{},\"contract_session_id\":{},\"contract_id\":{},\"reason\":{},"
+        "\"reason_kind\":{}",
+        Json::Quote(RelayEvents::k_SourceEngineTelemetry), Json::Quote(p_Event.engine_event),
+        Json::Quote(p_Event.contract_session_id), Json::Quote(p_Event.contract_id), Json::Quote(p_Event.reason),
+        Json::Quote(p_Event.reason_kind)
+    );
+
+    if (p_Event.engine_timestamp_s)
+        s_Json += fmt::format(",\"engine_timestamp_s\":{}", *p_Event.engine_timestamp_s);
+
+    s_Json += "}";
+    return s_Json;
+}
+
 std::string RelaySerialization::Envelope(const RelayEnvelope& p_Envelope)
 {
     return fmt::format(

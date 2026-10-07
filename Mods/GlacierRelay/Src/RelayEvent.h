@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <variant>
@@ -30,6 +31,17 @@ namespace RelayEvents
     constexpr int k_ActorDiedSchemaVersion = 1;
     constexpr const char* k_ActorPacified = "actor.pacified";
     constexpr int k_ActorPacifiedSchemaVersion = 1;
+
+    // Contract lifecycle, normalized from Glacier's engine-authored telemetry (M2 B2, design
+    // section 27). contract.started: Glacier recorded the start of a contract session (its
+    // "ContractStart" event). contract.ended: Glacier recorded the end of one (its "ContractFailed"
+    // event, which the engine raises for a manual restart and for an exit to the menu alike, so the
+    // Relay name does not say "failed"). Neither name claims anything about the Relay mission
+    // attempt, mission success, failure, completion or player death.
+    constexpr const char* k_ContractStarted = "contract.started";
+    constexpr int k_ContractStartedSchemaVersion = 1;
+    constexpr const char* k_ContractEnded = "contract.ended";
+    constexpr int k_ContractEndedSchemaVersion = 1;
 
     // Provenance value carried by events normalized from the telemetry stream.
     constexpr const char* k_SourceEngineTelemetry = "engine_telemetry";
@@ -105,4 +117,39 @@ struct ActorOutcomeEvent
     std::optional<double> engine_timestamp_s;
 
     bool operator==(const ActorOutcomeEvent&) const = default;
+};
+
+// The start of a Glacier contract session, schema version 1. Bounded to contract lifecycle on
+// purpose (M2 design, section 27.7): the loadout, item traits, game changers and spawn location
+// the source event also carries are not part of this event; they belong to later vocabularies
+// (items, B4) or to no decided use yet. contract_session_id is Glacier's identity for Glacier's
+// session; it is not a Relay attempt identity and BEAM correlates the two by stream order only.
+struct ContractStartedEvent
+{
+    std::string engine_event; // provenance: the Glacier event name ("ContractStart")
+    std::string contract_session_id;
+    std::string contract_id;
+    std::string location_id;   // open-ended engine string, e.g. "LOCATION_PARIS"
+    std::string contract_type; // open-ended engine string, e.g. "mission"
+    int64_t difficulty_level = 0; // the engine's number, not mapped to a name
+    std::string starting_disguise_repository_id;
+    bool is_hitman_suit = false;
+    std::optional<double> engine_timestamp_s; // the stream's Timestamp (seconds on the contract clock)
+
+    bool operator==(const ContractStartedEvent&) const = default;
+};
+
+// The end of a Glacier contract session, schema version 1. reason is the engine's string verbatim;
+// reason_kind is the Relay mapping of the strings observed so far ("restart", "exit_to_menu") with
+// "other" for anything else, so a new engine string never makes a valid event malformed.
+struct ContractEndedEvent
+{
+    std::string engine_event; // provenance: the Glacier event name ("ContractFailed")
+    std::string contract_session_id;
+    std::string contract_id;
+    std::string reason;
+    std::string reason_kind; // "restart" | "exit_to_menu" | "other"
+    std::optional<double> engine_timestamp_s;
+
+    bool operator==(const ContractEndedEvent&) const = default;
 };

@@ -69,6 +69,22 @@ void RelayAdapter::Publish(const ActorOutcomeEvent& p_Event)
     );
 }
 
+void RelayAdapter::Publish(const ContractStartedEvent& p_Event)
+{
+    PublishEnvelope(
+        RelayEvents::k_ContractStarted, RelayEvents::k_ContractStartedSchemaVersion,
+        RelaySerialization::ContractStartedPayloadJson(p_Event)
+    );
+}
+
+void RelayAdapter::Publish(const ContractEndedEvent& p_Event)
+{
+    PublishEnvelope(
+        RelayEvents::k_ContractEnded, RelayEvents::k_ContractEndedSchemaVersion,
+        RelaySerialization::ContractEndedPayloadJson(p_Event)
+    );
+}
+
 void RelayAdapter::Publish(const MissionEvent& p_Event)
 {
     std::visit([this](const auto& p_Concrete) { Publish(p_Concrete); }, p_Event);

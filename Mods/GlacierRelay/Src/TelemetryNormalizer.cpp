@@ -7,26 +7,43 @@
 namespace
 {
     // The table. One row per supported source event; adding a vocabulary means adding rows and a
-    // mapping function, never a pass-through.
+    // mapping function, never a pass-through. Each row names the Relay event family it maps to and
+    // how the plugin gates its publication (TelemetryNormalizer.h).
+    enum class Family
+    {
+        ActorDied,
+        ActorPacified,
+        ContractStarted,
+        ContractEnded,
+    };
+
     struct SourceEvent
     {
         std::string_view name;
-        ActorOutcomeEvent::Kind kind;
+        Family family;
+        TelemetryNormalizer::Gating gating;
     };
 
-    constexpr SourceEvent k_ActorOutcomeSources[] = {
-        {"Kill", ActorOutcomeEvent::Kind::Died},
-        {"Pacify", ActorOutcomeEvent::Kind::Pacified},
+    constexpr SourceEvent k_Sources[] = {
+        {"Kill", Family::ActorDied, TelemetryNormalizer::Gating::AttemptGated},
+        {"Pacify", Family::ActorPacified, TelemetryNormalizer::Gating::AttemptGated},
+        {"ContractStart", Family::ContractStarted, TelemetryNormalizer::Gating::Ungated},
+        {"ContractFailed", Family::ContractEnded, TelemetryNormalizer::Gating::Ungated},
     };
 
-    const SourceEvent* FindActorOutcomeSource(std::string_view p_Name)
+    const SourceEvent* FindSource(std::string_view p_Name)
     {
-        for (const auto& s_Source : k_ActorOutcomeSources)
+        for (const auto& s_Source : k_Sources)
             if (s_Source.name == p_Name)
                 return &s_Source;
 
         return nullptr;
     }
+
+    // The ContractFailed reason strings observed on game 3.280.0.0 (B0 and B1 corpora), matched
+    // exactly. A variant spelling is evidence of a new string, not something to approximate.
+    constexpr std::string_view k_ReasonRestart = "Contract ended manually: OnRestartLevel";
+    constexpr std::string_view k_ReasonExitToMenu = "Contract ended manually: User pressed exit to Main menu";
 
     // Field readers. Each returns false and fills p_Detail when the field is missing or not of the
     // expected kind. The stream sends every number as a float64, so integers are accepted when the
@@ -152,7 +169,18 @@ namespace
 
 bool TelemetryNormalizer::IsSupportedSourceName(std::string_view p_Name)
 {
-    return FindActorOutcomeSource(p_Name) != nullptr;
+    return FindSource(p_Name) != nullptr;
+}
+
+std::string TelemetryNormalizer::ReasonKind(std::string_view p_Reason)
+{
+    if (p_Reason == k_ReasonRestart)
+        return "restart";
+
+    if (p_Reason == k_ReasonExitToMenu)
+        return "exit_to_menu";
+
+    return "other";
 }
 
 std::string TelemetryNormalizer::DeathTypeName(int p_Code)
@@ -214,7 +242,7 @@ TelemetryNormalizer::Result TelemetryNormalizer::Normalize(const TelemetryObserv
         return s_Result;
     }
 
-    const auto* s_Source = FindActorOutcomeSource(p_Observation.name);
+    const auto* s_Source = FindSource(p_Observation.name);
 
     if (!s_Source)
     {
@@ -224,7 +252,98 @@ TelemetryNormalizer::Result TelemetryNormalizer::Normalize(const TelemetryObserv
         return s_Result;
     }
 
-    return NormalizeActorOutcome(p_Observation, s_Source->kind);
+    switch (s_Source->family)
+    {
+        case Family::ActorDied: s_Result = NormalizeActorOutcome(p_Observation, ActorOutcomeEvent::Kind::Died); break;
+        case Family::ActorPacified: s_Result = NormalizeActorOutcome(p_Observation, ActorOutcomeEvent::Kind::Pacified); break;
+        case Family::ContractStarted: s_Result = NormalizeContractStarted(p_Observation); break;
+        case Family::ContractEnded: s_Result = NormalizeContractEnded(p_Observation); break;
+    }
+
+    s_Result.gating = s_Source->gating;
+    return s_Result;
+}
+
+TelemetryNormalizer::Result TelemetryNormalizer::Malformed(
+    const TelemetryObservation& p_Observation, const std::string& p_Detail
+)
+{
+    Result s_Result;
+    ++m_Counters.malformed;
+    Count(m_Counters.malformed_by_name, p_Observation.name);
+    s_Result.outcome = Outcome::Malformed;
+    s_Result.detail = p_Detail;
+    return s_Result;
+}
+
+TelemetryNormalizer::Result TelemetryNormalizer::NormalizeContractStarted(const TelemetryObservation& p_Observation)
+{
+    std::string s_Detail;
+    const TelemetryValue& s_Value = p_Observation.value;
+
+    if (s_Value.kind != TelemetryValue::Kind::Object)
+        return Malformed(p_Observation, "Value is not an object");
+
+    // The session the event is about is on the stream envelope, not in Value; it is the subject of
+    // the Relay event and therefore required (M2 design, section 27.7).
+    if (p_Observation.contract_session_id.empty())
+        return Malformed(p_Observation, "missing envelope field 'ContractSessionId'");
+
+    ContractStartedEvent s_Event;
+    s_Event.engine_event = p_Observation.name;
+    s_Event.contract_session_id = p_Observation.contract_session_id;
+    s_Event.contract_id = p_Observation.contract_id;
+
+    if (!ReadString(s_Value, "LocationId", s_Event.location_id, s_Detail)
+        || !ReadString(s_Value, "ContractType", s_Event.contract_type, s_Detail)
+        || !ReadInteger(s_Value, "DifficultyLevel", s_Event.difficulty_level, s_Detail)
+        || !ReadString(s_Value, "Disguise", s_Event.starting_disguise_repository_id, s_Detail)
+        || !ReadBool(s_Value, "IsHitmanSuit", s_Event.is_hitman_suit, s_Detail))
+    {
+        return Malformed(p_Observation, s_Detail);
+    }
+
+    // Deliberately not read: Loadout, GameChangers, IsVR, SelectedCharacterId (section 27.7).
+
+    if (p_Observation.has_timestamp)
+        s_Event.engine_timestamp_s = p_Observation.timestamp_s;
+
+    Result s_Result;
+    ++m_Counters.normalized;
+    s_Result.outcome = Outcome::Normalized;
+    s_Result.contract_started = std::move(s_Event);
+    return s_Result;
+}
+
+TelemetryNormalizer::Result TelemetryNormalizer::NormalizeContractEnded(const TelemetryObservation& p_Observation)
+{
+    const TelemetryValue& s_Value = p_Observation.value;
+
+    // ContractFailed carries its reason as the Value itself, a string.
+    if (s_Value.kind != TelemetryValue::Kind::String)
+        return Malformed(p_Observation, "Value is not a string");
+
+    if (s_Value.text.empty())
+        return Malformed(p_Observation, "Value (reason) is empty");
+
+    if (p_Observation.contract_session_id.empty())
+        return Malformed(p_Observation, "missing envelope field 'ContractSessionId'");
+
+    ContractEndedEvent s_Event;
+    s_Event.engine_event = p_Observation.name;
+    s_Event.contract_session_id = p_Observation.contract_session_id;
+    s_Event.contract_id = p_Observation.contract_id;
+    s_Event.reason = s_Value.text;
+    s_Event.reason_kind = ReasonKind(s_Event.reason);
+
+    if (p_Observation.has_timestamp)
+        s_Event.engine_timestamp_s = p_Observation.timestamp_s;
+
+    Result s_Result;
+    ++m_Counters.normalized;
+    s_Result.outcome = Outcome::Normalized;
+    s_Result.contract_ended = std::move(s_Event);
+    return s_Result;
 }
 
 TelemetryNormalizer::Result TelemetryNormalizer::NormalizeActorOutcome(
@@ -234,13 +353,7 @@ TelemetryNormalizer::Result TelemetryNormalizer::NormalizeActorOutcome(
     Result s_Result;
     std::string s_Detail;
 
-    auto s_Malformed = [&](const std::string& p_Detail) {
-        ++m_Counters.malformed;
-        Count(m_Counters.malformed_by_name, p_Observation.name);
-        s_Result.outcome = Outcome::Malformed;
-        s_Result.detail = p_Detail;
-        return s_Result;
-    };
+    auto s_Malformed = [&](const std::string& p_Detail) { return Malformed(p_Observation, p_Detail); };
 
     const TelemetryValue& s_Value = p_Observation.value;
 

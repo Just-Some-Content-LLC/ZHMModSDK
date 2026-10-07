@@ -30,5 +30,8 @@ namespace RelaySerialization
     std::string MissionScenePayloadJson(const MissionScenePayload& p_Payload);
     // Schema version 1 of actor.died / actor.pacified: the same shape for both.
     std::string ActorOutcomePayloadJson(const ActorOutcomeEvent& p_Event);
+    // Schema version 1 of contract.started and contract.ended.
+    std::string ContractStartedPayloadJson(const ContractStartedEvent& p_Event);
+    std::string ContractEndedPayloadJson(const ContractEndedEvent& p_Event);
     std::string Envelope(const RelayEnvelope& p_Envelope);
 }
