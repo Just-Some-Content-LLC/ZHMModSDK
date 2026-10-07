@@ -64,6 +64,7 @@ set(MODS
         FreelancerSeeder
         QuickSave
         GlacierRelay
+        GlacierRelayActorProbe
 )
 
 foreach (MOD IN LISTS MODS)
