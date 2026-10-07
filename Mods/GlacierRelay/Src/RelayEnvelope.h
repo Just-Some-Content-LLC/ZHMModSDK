@@ -28,5 +28,7 @@ namespace RelaySerialization
 {
     // Schema version 1 of both mission lifecycle payloads: the same four fields.
     std::string MissionScenePayloadJson(const MissionScenePayload& p_Payload);
+    // Schema version 1 of actor.died / actor.pacified: the same shape for both.
+    std::string ActorOutcomePayloadJson(const ActorOutcomeEvent& p_Event);
     std::string Envelope(const RelayEnvelope& p_Envelope);
 }

@@ -26,6 +26,10 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/SceneState.h
         Src/TcpRelaySink.cpp
         Src/TcpRelaySink.h
+        Src/TelemetryNormalizer.cpp
+        Src/TelemetryNormalizer.h
+        Src/TelemetryObservation.h
+        Src/TelemetryQueue.h
 )
 
 set(RELAY_GLACIER_FACING_SOURCES
@@ -33,6 +37,8 @@ set(RELAY_GLACIER_FACING_SOURCES
         Src/GlacierRelay.h
         Src/SceneObservation.cpp
         Src/SceneObservation.h
+        Src/TelemetryIntake.cpp
+        Src/TelemetryIntake.h
 )
 
 add_library(GlacierRelay SHARED
@@ -58,11 +64,16 @@ add_executable(GlacierRelayTests
         Tests/MissionObserverTests.cpp
         Tests/RelayAdapterTests.cpp
         Tests/TcpRelaySinkTests.cpp
+        Tests/TelemetryNormalizerTests.cpp
+        Tests/TelemetryQueueTests.cpp
         Tests/TestHarness.h
+        Tests/TestJson.h
+        Tests/Fixtures/B0ActorOutcomes.h
 )
 
 target_include_directories(GlacierRelayTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Src
+        ${CMAKE_CURRENT_SOURCE_DIR}/Tests
 )
 
 target_link_libraries(GlacierRelayTests PRIVATE
@@ -81,6 +92,7 @@ add_executable(GlacierRelayWireProbe
 
 target_include_directories(GlacierRelayWireProbe PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Src
+        ${CMAKE_CURRENT_SOURCE_DIR}/Tests
 )
 
 target_link_libraries(GlacierRelayWireProbe PRIVATE

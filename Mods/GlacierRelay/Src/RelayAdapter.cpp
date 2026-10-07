@@ -59,6 +59,16 @@ void RelayAdapter::Publish(const MissionStoppedEvent& p_Event)
     );
 }
 
+void RelayAdapter::Publish(const ActorOutcomeEvent& p_Event)
+{
+    const bool s_Died = p_Event.kind == ActorOutcomeEvent::Kind::Died;
+    PublishEnvelope(
+        s_Died ? RelayEvents::k_ActorDied : RelayEvents::k_ActorPacified,
+        s_Died ? RelayEvents::k_ActorDiedSchemaVersion : RelayEvents::k_ActorPacifiedSchemaVersion,
+        RelaySerialization::ActorOutcomePayloadJson(p_Event)
+    );
+}
+
 void RelayAdapter::Publish(const MissionEvent& p_Event)
 {
     std::visit([this](const auto& p_Concrete) { Publish(p_Concrete); }, p_Event);

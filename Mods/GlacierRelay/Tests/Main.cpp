@@ -3,11 +3,15 @@
 void RunMissionObserverTests();
 void RunRelayAdapterTests();
 void RunTcpRelaySinkTests();
+void RunTelemetryNormalizerTests();
+void RunTelemetryQueueTests();
 
 int main()
 {
     RunMissionObserverTests();
     RunRelayAdapterTests();
+    RunTelemetryNormalizerTests();
+    RunTelemetryQueueTests();
     RunTcpRelaySinkTests();
 
     if (g_Failures == 0)

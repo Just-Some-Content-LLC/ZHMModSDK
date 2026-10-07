@@ -28,6 +28,7 @@ public:
     void Publish(const MissionPlayingEvent& p_Event);
     void Publish(const MissionStoppedEvent& p_Event);
     void Publish(const MissionEvent& p_Event);
+    void Publish(const ActorOutcomeEvent& p_Event);
 
     const std::string& InstanceId() const { return m_InstanceId; }
     uint64_t PublishedCount() const { return m_Sequence; }

@@ -18,6 +18,53 @@ std::string RelaySerialization::MissionScenePayloadJson(const MissionScenePayloa
     return s_Json;
 }
 
+std::string RelaySerialization::ActorOutcomePayloadJson(const ActorOutcomeEvent& p_Event)
+{
+    std::string s_Json = fmt::format(
+        "{{\"source\":{},\"repository_id\":{},\"actor_name\":{},\"engine_actor_id\":{},\"actor_type\":{}",
+        Json::Quote(RelayEvents::k_SourceEngineTelemetry), Json::Quote(p_Event.repository_id),
+        Json::Quote(p_Event.actor_name), p_Event.engine_actor_id, Json::Quote(p_Event.actor_type)
+    );
+
+    if (p_Event.actor_type_code)
+        s_Json += fmt::format(",\"actor_type_code\":{}", *p_Event.actor_type_code);
+
+    s_Json += fmt::format(
+        ",\"is_target\":{},\"death_type\":{}", p_Event.is_target ? "true" : "false", Json::Quote(p_Event.death_type)
+    );
+
+    if (p_Event.death_type_code)
+        s_Json += fmt::format(",\"death_type_code\":{}", *p_Event.death_type_code);
+
+    s_Json += fmt::format(",\"death_context\":{}", Json::Quote(p_Event.death_context));
+
+    if (p_Event.death_context_code)
+        s_Json += fmt::format(",\"death_context_code\":{}", *p_Event.death_context_code);
+
+    s_Json += fmt::format(
+        ",\"accident\":{},\"kill_class\":{},\"method_broad\":{},\"method_strict\":{},\"damage_events\":[",
+        p_Event.accident ? "true" : "false", Json::Quote(p_Event.kill_class), Json::Quote(p_Event.method_broad),
+        Json::Quote(p_Event.method_strict)
+    );
+
+    for (size_t i = 0; i < p_Event.damage_events.size(); ++i)
+        s_Json += (i ? "," : "") + Json::Quote(p_Event.damage_events[i]);
+
+    s_Json += "]";
+
+    if (p_Event.item_repository_id)
+        s_Json += fmt::format(",\"item_repository_id\":{}", Json::Quote(*p_Event.item_repository_id));
+
+    if (p_Event.contract_session_id)
+        s_Json += fmt::format(",\"contract_session_id\":{}", Json::Quote(*p_Event.contract_session_id));
+
+    if (p_Event.engine_timestamp_s)
+        s_Json += fmt::format(",\"engine_timestamp_s\":{}", *p_Event.engine_timestamp_s);
+
+    s_Json += "}";
+    return s_Json;
+}
+
 std::string RelaySerialization::Envelope(const RelayEnvelope& p_Envelope)
 {
     return fmt::format(
