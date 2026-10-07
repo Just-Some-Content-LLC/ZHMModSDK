@@ -86,6 +86,57 @@ namespace
             return "";
         }
 
+        // True when another connection is waiting in the backlog.
+        bool Pending()
+        {
+            fd_set s_Readable;
+            FD_ZERO(&s_Readable);
+            FD_SET(Listen, &s_Readable);
+            timeval s_Timeout = {0, 0};
+            return select(0, &s_Readable, nullptr, nullptr, &s_Timeout) > 0;
+        }
+
+        // True when the accepted peer has already closed its end (a FIN or RST is waiting).
+        bool PeerClosed()
+        {
+            u_long s_NonBlocking = 1;
+            ioctlsocket(Client, FIONBIO, &s_NonBlocking);
+            char s_Peek;
+            const int s_Received = recv(Client, &s_Peek, 1, MSG_PEEK);
+            const int s_Error = WSAGetLastError();
+            s_NonBlocking = 0;
+            ioctlsocket(Client, FIONBIO, &s_NonBlocking);
+            return s_Received == 0 || (s_Received < 0 && s_Error != WSAEWOULDBLOCK);
+        }
+
+        // Accepts the connection the sink currently holds. On Windows loopback a connect the sink
+        // abandoned at its connect timeout can still complete in the kernel a moment later (the stack
+        // retries a refused SYN after ~500 ms) and land in the backlog ahead of the sink's next, live
+        // attempt; the sink closes that abandoned socket before it retries. So: accept, wait until
+        // the sink says it is connected, then move to the newest pending connection and confirm the
+        // peer has not closed it.
+        bool AcceptLive(const TcpRelaySink& p_Sink, uint32_t p_TimeoutMs)
+        {
+            if (!Accept(p_TimeoutMs))
+                return false;
+
+            const auto s_Deadline = Clock::now() + std::chrono::milliseconds(p_TimeoutMs);
+
+            while (!p_Sink.GetStats().connected && Clock::now() < s_Deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            if (!p_Sink.GetStats().connected)
+                return false;
+
+            while (Pending())
+            {
+                CloseClient();
+                Client = accept(Listen, nullptr, nullptr);
+            }
+
+            return Client != INVALID_SOCKET && !PeerClosed();
+        }
+
         void CloseClient()
         {
             if (Client != INVALID_SOCKET)
@@ -187,8 +238,8 @@ void RunTcpRelaySinkTests()
 
         TestListener s_Listener;
         CHECK(s_Listener.Start(s_Port));
-        CHECK(s_Listener.Accept(3000));
-        CHECK(WaitUntil(1000, [&] { return s_Sink.GetStats().connected; }));
+        CHECK(s_Listener.AcceptLive(s_Sink, 3000));
+        CHECK(s_Sink.GetStats().connected);
 
         s_Sink.Publish(Envelope(1));
         s_Sink.Publish(Envelope(2));
@@ -213,8 +264,8 @@ void RunTcpRelaySinkTests()
         // 5. Backend returns: reconnects and delivers again.
         TestListener s_Again;
         CHECK(s_Again.Start(s_Port));
-        CHECK(s_Again.Accept(3000));
-        CHECK(WaitUntil(1000, [&] { return s_Sink.GetStats().connected; }));
+        CHECK(s_Again.AcceptLive(s_Sink, 3000));
+        CHECK(s_Sink.GetStats().connected);
         s_Sink.Publish(Envelope(5));
         CHECK(s_Again.ReadLine(2000) == "{\"sequence\":5}");
 
