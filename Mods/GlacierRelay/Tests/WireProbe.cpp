@@ -15,10 +15,13 @@
 #include <thread>
 #include <vector>
 
+#include "Fixtures/B0ActorOutcomes.h"
 #include "MissionObserver.h"
 #include "RelayAdapter.h"
 #include "RelayLog.h"
 #include "TcpRelaySink.h"
+#include "TelemetryNormalizer.h"
+#include "TestJson.h"
 
 namespace
 {
@@ -112,6 +115,27 @@ int main(int p_Argc, char** p_Argv)
             s_Event.codename_hint = "Peacock";
             s_Adapter.Publish(s_Event);
             ++s_Expected;
+        }
+        else if (s_Step == "b1")
+        {
+            TelemetryNormalizer s_Normalizer;
+
+            for (size_t i = 0; i < B0Fixtures::k_ActorOutcomeCount; ++i)
+            {
+                const auto s_Result = s_Normalizer.Normalize(
+                    TestJson::ObservationFromRecordedEvent(B0Fixtures::k_ActorOutcomes[i].json, static_cast<uint32_t>(i + 1))
+                );
+
+                if (s_Result.outcome != TelemetryNormalizer::Outcome::Normalized)
+                {
+                    std::printf("b1: fixture %zu did not normalize (%s)\n", i, s_Result.detail.c_str());
+                    return 3;
+                }
+
+                s_Adapter.Publish(*s_Result.event);
+                ++s_Expected;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
         }
         else if (s_Step == "stop")
         {
