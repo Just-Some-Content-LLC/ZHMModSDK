@@ -292,4 +292,84 @@ void RunDisguiseTelemetryTests()
         CHECK(s_Normalizer.Normalize(TestJson::ObservationFromRecordedEvent(
             B0Fixtures::k_ContractLifecycle[B0Fixtures::k_ContractStartA].json)).gating == TelemetryNormalizer::Gating::Ungated);
     }
+
+    // Frame order, observed shape (B0 session 1 through the production sequencing): every disguise
+    // event is captured inside the attempt and publishes in its drain, in the shared sequence,
+    // interleaved with actor outcomes exactly as captured.
+    {
+        Rig s_Rig;
+        s_Rig.Frame(k_Playing);
+        CHECK(s_Rig.Queue.Push(Disguise(B0Fixtures::k_StartingSuitA)));
+        s_Rig.Frame(k_Playing);
+        CHECK(s_Rig.Queue.Push(Disguise(B0Fixtures::k_DisguiseChange1)));
+        CHECK(s_Rig.Queue.Push(Disguise(B0Fixtures::k_DisguiseBlown1)));
+        s_Rig.Frame(k_Playing);
+        CHECK(s_Rig.Queue.Push(Actor(0))); // Pacify Parker
+        CHECK(s_Rig.Queue.Push(Actor(3))); // Kill Ducloitre
+        CHECK(s_Rig.Queue.Push(Disguise(B0Fixtures::k_DisguiseCleared1)));
+        auto s_Drain = s_Rig.Frame(k_Playing);
+        CHECK(s_Drain.outcomes_published == 3 && s_Drain.outside_attempt == 0 && s_Drain.ungated_published == 0);
+        CHECK(s_Rig.Types() == (std::vector<std::string>{
+            "mission.playing", "disguise.equipped", "disguise.equipped", "disguise.compromised",
+            "actor.pacified", "actor.died", "disguise.compromise_cleared"}));
+        CHECK(s_Rig.Contiguous());
+        CHECK(s_Rig.Warnings.empty());
+    }
+
+    // Fall-frame ordering (a), synthetic: a Disguise queued BEFORE the fall frame's drain is judged
+    // against the playing state and publishes before mission.stopped.
+    {
+        Rig s_Rig;
+        s_Rig.Frame(k_Playing);
+        CHECK(s_Rig.Queue.Push(Disguise(B0Fixtures::k_DisguiseChange2)));
+        auto s_Fall = s_Rig.Frame(k_Fallen);
+        CHECK(s_Fall.outcomes_published == 1 && s_Fall.outside_attempt == 0 && s_Fall.edge_published);
+        CHECK(s_Rig.Types() == (std::vector<std::string>{"mission.playing", "disguise.equipped", "mission.stopped"}));
+        CHECK(s_Rig.Sink->Published[1].sequence == 2 && s_Rig.Sink->Published[2].sequence == 3);
+        CHECK(s_Rig.Warnings.empty());
+    }
+
+    // Fall-frame ordering (b), synthetic: the same observation emitted AFTER that frame's drain is
+    // presented on the next processed frame, with no attempt open. Attempt-gated: counted outside
+    // attempt, warned, not published, no sequence consumed. The counter is the only evidence.
+    {
+        Rig s_Rig;
+        s_Rig.Frame(k_Playing);
+        auto s_Fall = s_Rig.Frame(k_Fallen);
+        CHECK(s_Fall.edge_published);
+        CHECK(s_Rig.Queue.Push(Disguise(B0Fixtures::k_DisguiseChange2)));
+        auto s_Next = s_Rig.Frame(k_Reloading);
+        CHECK(s_Next.outside_attempt == 1 && s_Next.outcomes_published == 0 && !s_Next.edge_published);
+        CHECK(s_Rig.Types() == (std::vector<std::string>{"mission.playing", "mission.stopped"}));
+        CHECK(s_Rig.Adapter->PublishedCount() == 2);
+        CHECK(s_Rig.Warnings.size() == 1 && s_Rig.Warnings[0].find("no open mission attempt") != std::string::npos);
+    }
+
+    // An ungated contract event in the same drain as an outside-attempt disguise event still
+    // publishes (B2 behaviour unchanged beside the new rows).
+    {
+        Rig s_Rig;
+        s_Rig.Frame(k_Playing);
+        s_Rig.Frame(k_Fallen);
+        CHECK(s_Rig.Queue.Push(Disguise(B0Fixtures::k_StartingSuitB)));
+        CHECK(s_Rig.Queue.Push(TestJson::ObservationFromRecordedEvent(
+            B0Fixtures::k_ContractLifecycle[B0Fixtures::k_ContractFailedExitB].json, 211)));
+        auto s_After = s_Rig.Frame(k_Reloading);
+        CHECK(s_After.outside_attempt == 1 && s_After.ungated_published == 1 && s_After.outcomes_published == 0);
+        CHECK(s_Rig.Types() == (std::vector<std::string>{"mission.playing", "mission.stopped", "contract.ended"}));
+    }
+
+    // A malformed disguise observation consumes no sequence and is warned like any other.
+    {
+        Rig s_Rig;
+        s_Rig.Frame(k_Playing);
+        auto s_Bad = Disguise(B0Fixtures::k_DisguiseBlown1);
+        s_Bad.value.text.clear();
+        CHECK(s_Rig.Queue.Push(s_Bad));
+        CHECK(s_Rig.Queue.Push(Disguise(B0Fixtures::k_DisguiseBlown1)));
+        auto s_Frame = s_Rig.Frame(k_Playing);
+        CHECK(s_Frame.malformed == 1 && s_Frame.outcomes_published == 1);
+        CHECK(s_Rig.Sink->Published.size() == 2 && s_Rig.Sink->Published[1].sequence == 2);
+        CHECK(s_Rig.Warnings.size() == 1 && s_Rig.Warnings[0].find("not normalized") != std::string::npos);
+    }
 }

@@ -26,11 +26,17 @@
 // lifecycle) publish whenever captured and valid, in the same drain and the same sequence, because
 // Glacier emits them before the rise and after the fall (design section 27.3); the plugin reports
 // the occurrence and BEAM correlates it. No grace window, no attachment here.
+//
+// M2 B3: disguise events are attempt-gated. What the drain-before-edge order does and does not
+// guarantee (design section 30.7): an observation already queued when this frame drains is judged
+// against the pre-edge state and publishes before this frame's edge; an occurrence the engine
+// emits later in the same frame is drained on the next processed frame, after the edge, and for an
+// attempt-gated row that is "outside attempt": counted and logged, never published.
 namespace RelayFrame
 {
     struct Result
     {
-        size_t outcomes_published = 0; // attempt-gated events published
+        size_t outcomes_published = 0; // attempt-gated events published (actor outcomes, disguise)
         size_t ungated_published = 0;  // ungated events published (contract lifecycle)
         size_t outside_attempt = 0;    // attempt-gated and normalized, but no attempt was open: not published
         size_t malformed = 0;
