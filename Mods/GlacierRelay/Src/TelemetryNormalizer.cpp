@@ -1,5 +1,6 @@
 #include "TelemetryNormalizer.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include <fmt/format.h>
@@ -152,6 +153,49 @@ namespace
         }
 
         return true;
+    }
+
+    // Diagnostic description of a copied value for a malformed detail: its kind and, for an
+    // Unsupported value, the engine type name the intake already copied (the only evidence of the
+    // engine's type that reaches the normalizer). Bounded and escaped: the text goes to the durable
+    // log on the frame thread and must never be trusted to be short or printable. No engine access.
+    constexpr size_t k_MaxTypeNameBytes = 64;
+
+    std::string EscapeBounded(std::string_view p_Text)
+    {
+        std::string s_Out;
+        const size_t s_Limit = std::min(p_Text.size(), k_MaxTypeNameBytes);
+
+        for (size_t i = 0; i < s_Limit; ++i)
+        {
+            const unsigned char c = static_cast<unsigned char>(p_Text[i]);
+
+            if (c >= 0x20 && c < 0x7F && c != '\'' && c != '\\')
+                s_Out += static_cast<char>(c);
+            else
+                s_Out += fmt::format("\\x{:02X}", c);
+        }
+
+        if (p_Text.size() > k_MaxTypeNameBytes)
+            s_Out += "...";
+
+        return s_Out;
+    }
+
+    std::string DescribeValue(const TelemetryValue& p_Value)
+    {
+        switch (p_Value.kind)
+        {
+            case TelemetryValue::Kind::Null: return "kind=Null";
+            case TelemetryValue::Kind::Bool: return "kind=Bool";
+            case TelemetryValue::Kind::Number: return "kind=Number";
+            case TelemetryValue::Kind::String: return fmt::format("kind=String bytes={}", p_Value.text.size());
+            case TelemetryValue::Kind::Array: return fmt::format("kind=Array items={}", p_Value.items.size());
+            case TelemetryValue::Kind::Object: return fmt::format("kind=Object fields={}", p_Value.fields.size());
+            case TelemetryValue::Kind::Unsupported: return fmt::format("kind=Unsupported type='{}'", EscapeBounded(p_Value.text));
+        }
+
+        return "kind=?";
     }
 
     // Optional string: absent is fine; present but not a string is malformed.
@@ -372,8 +416,10 @@ TelemetryNormalizer::Result TelemetryNormalizer::NormalizeDisguise(
     // All four source events carry the outfit definition repository id as the Value itself, a
     // string (B0 corpus, 8/8). It is the event's subject, so it is required and non-empty. Its
     // format is not checked: the engine's id form is evidence, not a contract.
+    // The B3 run (design section 32) rejected 9/9 disguise values here; the copied kind and, for
+    // an Unsupported value, the engine type name are the evidence the next step needs.
     if (s_Value.kind != TelemetryValue::Kind::String)
-        return Malformed(p_Observation, "Value is not a string");
+        return Malformed(p_Observation, fmt::format("Value is not a string ({})", DescribeValue(s_Value)));
 
     if (s_Value.text.empty())
         return Malformed(p_Observation, "Value (disguise repository id) is empty");

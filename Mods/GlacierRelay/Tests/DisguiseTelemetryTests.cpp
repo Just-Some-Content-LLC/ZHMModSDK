@@ -250,6 +250,84 @@ void RunDisguiseTelemetryTests()
         CHECK(s_Normalizer.GetCounters().malformed_by_name.at("StartingSuit") == 1);
     }
 
+    // Diagnostic detail (B3 runtime follow-up, design section 33): a rejected Value reports its
+    // copied kind and, when Unsupported, the engine type name the intake copied — bounded and
+    // escaped. Rejection, counters, publication and sequence are unchanged by the detail.
+    {
+        TelemetryNormalizer s_Normalizer;
+
+        auto s_Case = [&](TelemetryValue p_Value) {
+            auto s_Obs = Disguise(B0Fixtures::k_DisguiseBlown1);
+            s_Obs.value = std::move(p_Value);
+            const auto s_Result = s_Normalizer.Normalize(s_Obs);
+            CHECK(s_Result.outcome == TelemetryNormalizer::Outcome::Malformed);
+            CHECK(!s_Result.disguise.has_value());
+            return s_Result.detail;
+        };
+
+        TelemetryValue s_Unsupported;
+        s_Unsupported.kind = TelemetryValue::Kind::Unsupported;
+        s_Unsupported.text = "ZRepositoryID";
+        CHECK(s_Case(s_Unsupported) == "Value is not a string (kind=Unsupported type='ZRepositoryID')");
+
+        TelemetryValue s_Null;
+        CHECK(s_Case(s_Null) == "Value is not a string (kind=Null)");
+
+        CHECK(s_Case(TestJson::Parse("7")) == "Value is not a string (kind=Number)");
+        CHECK(s_Case(TestJson::Parse("true")) == "Value is not a string (kind=Bool)");
+        CHECK(s_Case(TestJson::Parse(R"(["a","b"])")) == "Value is not a string (kind=Array items=2)");
+        CHECK(s_Case(TestJson::Parse(R"({"Disguise":"x","IsHitmanSuit":false})")) == "Value is not a string (kind=Object fields=2)");
+
+        // Truncated-by-the-intake marker is just another Unsupported type text.
+        TelemetryValue s_Truncated;
+        s_Truncated.kind = TelemetryValue::Kind::Unsupported;
+        s_Truncated.text = "<truncated>";
+        CHECK(s_Case(s_Truncated) == "Value is not a string (kind=Unsupported type='<truncated>')");
+
+        // Escaping: quotes, backslashes, control and non-ASCII bytes become \xNN; nothing raw leaks.
+        TelemetryValue s_Hostile;
+        s_Hostile.kind = TelemetryValue::Kind::Unsupported;
+        s_Hostile.text = std::string("Z'\\\n\x01") + "\xC3\xA9" + "Q";
+        CHECK(s_Case(s_Hostile) == "Value is not a string (kind=Unsupported type='Z\\x27\\x5C\\x0A\\x01\\xC3\\xA9Q')");
+
+        // Bounding: at most 64 bytes of the type name, then "...".
+        TelemetryValue s_Long;
+        s_Long.kind = TelemetryValue::Kind::Unsupported;
+        s_Long.text = std::string(100, 'T');
+        const auto s_LongDetail = s_Case(s_Long);
+        CHECK(s_LongDetail == "Value is not a string (kind=Unsupported type='" + std::string(64, 'T') + "...')");
+
+        // An empty type name (the intake's Null branch covers most of these, but a registered type
+        // with an empty name would land here) is shown as empty, not omitted.
+        TelemetryValue s_Empty;
+        s_Empty.kind = TelemetryValue::Kind::Unsupported;
+        CHECK(s_Case(s_Empty) == "Value is not a string (kind=Unsupported type='')");
+
+        CHECK(s_Normalizer.GetCounters().malformed == 10);
+        CHECK(s_Normalizer.GetCounters().malformed_by_name.at("DisguiseBlown") == 10);
+        CHECK(s_Normalizer.GetCounters().normalized == 0);
+
+        // A valid string is unaffected by the diagnostic path.
+        CHECK(s_Normalizer.Normalize(Disguise(B0Fixtures::k_DisguiseBlown1)).outcome == TelemetryNormalizer::Outcome::Normalized);
+    }
+
+    // The diagnostic reaches the durable log through the existing warning path with the event
+    // name and index, and still consumes no sequence.
+    {
+        Rig s_Rig;
+        s_Rig.Frame(k_Playing);
+        auto s_Obs = Disguise(B0Fixtures::k_StartingSuitA);
+        s_Obs.value.kind = TelemetryValue::Kind::Unsupported;
+        s_Obs.value.text = "ZRepositoryID";
+        CHECK(s_Rig.Queue.Push(s_Obs));
+        CHECK(s_Rig.Queue.Push(Disguise(B0Fixtures::k_DisguiseChange1)));
+        auto s_Frame = s_Rig.Frame(k_Playing);
+        CHECK(s_Frame.malformed == 1 && s_Frame.outcomes_published == 1 && s_Frame.outside_attempt == 0);
+        CHECK(s_Rig.Sink->Published.size() == 2 && s_Rig.Sink->Published[1].sequence == 2);
+        CHECK(s_Rig.Warnings.size() == 1);
+        CHECK(s_Rig.Warnings[0] == "telemetry 'StartingSuit' (index 10) not normalized: Value is not a string (kind=Unsupported type='ZRepositoryID')");
+    }
+
     // Envelope provenance is optional: a payload without ContractSessionId or Timestamp is still
     // a valid occurrence (the id is the subject), with the optional fields absent.
     {
