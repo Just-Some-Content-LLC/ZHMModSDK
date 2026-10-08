@@ -43,6 +43,21 @@ namespace RelayEvents
     constexpr const char* k_ContractEnded = "contract.ended";
     constexpr int k_ContractEndedSchemaVersion = 1;
 
+    // Disguise, normalized from Glacier's engine-authored telemetry (M2 B3, design section 30).
+    // disguise.equipped: Glacier asserted the player's worn outfit (definition id); kind "initial"
+    // restates the outfit the attempt began in (its "StartingSuit" event, at intro end), kind
+    // "change" says the worn outfit changed to this id (its "Disguise" event).
+    // disguise.compromised: Glacier recorded that this outfit was blown ("DisguiseBlown").
+    // disguise.compromise_cleared: Glacier recorded that it no longer is ("BrokenDisguiseCleared").
+    // None of them says who noticed, whether a compromise persists across a later change, which NPC
+    // or instance the outfit came from, or what the outfit is called; ids only.
+    constexpr const char* k_DisguiseEquipped = "disguise.equipped";
+    constexpr int k_DisguiseEquippedSchemaVersion = 1;
+    constexpr const char* k_DisguiseCompromised = "disguise.compromised";
+    constexpr int k_DisguiseCompromisedSchemaVersion = 1;
+    constexpr const char* k_DisguiseCompromiseCleared = "disguise.compromise_cleared";
+    constexpr int k_DisguiseCompromiseClearedSchemaVersion = 1;
+
     // Provenance value carried by events normalized from the telemetry stream.
     constexpr const char* k_SourceEngineTelemetry = "engine_telemetry";
 }
@@ -152,4 +167,27 @@ struct ContractEndedEvent
     std::optional<double> engine_timestamp_s;
 
     bool operator==(const ContractEndedEvent&) const = default;
+};
+
+// One disguise occurrence, schema version 1 for each of the three Relay event types (M2 B3). The
+// kind selects the event type; Initial and Change both publish as disguise.equipped and carry the
+// Relay-owned "kind" on the wire, with engine_event kept as provenance. disguise_repository_id is
+// the engine's outfit definition id verbatim: a definition, not an instance, and not a name.
+struct DisguiseEvent
+{
+    enum class Kind
+    {
+        Initial,          // disguise.equipped, kind "initial"  (StartingSuit)
+        Change,           // disguise.equipped, kind "change"   (Disguise)
+        Compromised,      // disguise.compromised               (DisguiseBlown)
+        CompromiseCleared // disguise.compromise_cleared        (BrokenDisguiseCleared)
+    };
+
+    Kind kind = Kind::Change;
+    std::string engine_event; // provenance: the Glacier event name
+    std::string disguise_repository_id;
+    std::optional<std::string> contract_session_id;
+    std::optional<double> engine_timestamp_s;
+
+    bool operator==(const DisguiseEvent&) const = default;
 };

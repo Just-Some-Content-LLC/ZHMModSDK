@@ -45,6 +45,7 @@ public:
         std::optional<ActorOutcomeEvent> event;            // Normalized, attempt-gated
         std::optional<ContractStartedEvent> contract_started; // Normalized, ungated
         std::optional<ContractEndedEvent> contract_ended;     // Normalized, ungated
+        std::optional<DisguiseEvent> disguise;                // Normalized, attempt-gated (M2 B3)
         std::string detail;                                // Malformed: the field and what was wrong
     };
 
@@ -81,6 +82,7 @@ private:
     Result NormalizeActorOutcome(const TelemetryObservation& p_Observation, ActorOutcomeEvent::Kind p_Kind);
     Result NormalizeContractStarted(const TelemetryObservation& p_Observation);
     Result NormalizeContractEnded(const TelemetryObservation& p_Observation);
+    Result NormalizeDisguise(const TelemetryObservation& p_Observation, DisguiseEvent::Kind p_Kind);
     Result Malformed(const TelemetryObservation& p_Observation, const std::string& p_Detail);
     void Count(std::map<std::string, uint64_t>& p_Map, const std::string& p_Name);
 

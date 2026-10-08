@@ -7,6 +7,7 @@ void RunTelemetryNormalizerTests();
 void RunTelemetryQueueTests();
 void RunRelayFrameTests();
 void RunContractLifecycleTests();
+void RunDisguiseTelemetryTests();
 
 int main()
 {
@@ -16,6 +17,7 @@ int main()
     RunTelemetryQueueTests();
     RunRelayFrameTests();
     RunContractLifecycleTests();
+    RunDisguiseTelemetryTests();
     RunTcpRelaySinkTests();
 
     if (g_Failures == 0)

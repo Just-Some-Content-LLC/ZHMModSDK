@@ -100,6 +100,32 @@ std::string RelaySerialization::ContractEndedPayloadJson(const ContractEndedEven
     return s_Json;
 }
 
+std::string RelaySerialization::DisguisePayloadJson(const DisguiseEvent& p_Event)
+{
+    std::string s_Json = fmt::format("{{\"source\":{}", Json::Quote(RelayEvents::k_SourceEngineTelemetry));
+
+    // The Relay-owned distinction between the initial assertion and a change travels only on
+    // disguise.equipped; the other two types have no kind.
+    if (p_Event.kind == DisguiseEvent::Kind::Initial)
+        s_Json += ",\"kind\":\"initial\"";
+    else if (p_Event.kind == DisguiseEvent::Kind::Change)
+        s_Json += ",\"kind\":\"change\"";
+
+    s_Json += fmt::format(
+        ",\"engine_event\":{},\"disguise_repository_id\":{}", Json::Quote(p_Event.engine_event),
+        Json::Quote(p_Event.disguise_repository_id)
+    );
+
+    if (p_Event.contract_session_id)
+        s_Json += fmt::format(",\"contract_session_id\":{}", Json::Quote(*p_Event.contract_session_id));
+
+    if (p_Event.engine_timestamp_s)
+        s_Json += fmt::format(",\"engine_timestamp_s\":{}", *p_Event.engine_timestamp_s);
+
+    s_Json += "}";
+    return s_Json;
+}
+
 std::string RelaySerialization::Envelope(const RelayEnvelope& p_Envelope)
 {
     return fmt::format(

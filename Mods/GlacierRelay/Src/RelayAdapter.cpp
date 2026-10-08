@@ -85,6 +85,29 @@ void RelayAdapter::Publish(const ContractEndedEvent& p_Event)
     );
 }
 
+void RelayAdapter::Publish(const DisguiseEvent& p_Event)
+{
+    const char* s_Type = RelayEvents::k_DisguiseEquipped;
+    int s_Version = RelayEvents::k_DisguiseEquippedSchemaVersion;
+
+    switch (p_Event.kind)
+    {
+        case DisguiseEvent::Kind::Initial:
+        case DisguiseEvent::Kind::Change:
+            break;
+        case DisguiseEvent::Kind::Compromised:
+            s_Type = RelayEvents::k_DisguiseCompromised;
+            s_Version = RelayEvents::k_DisguiseCompromisedSchemaVersion;
+            break;
+        case DisguiseEvent::Kind::CompromiseCleared:
+            s_Type = RelayEvents::k_DisguiseCompromiseCleared;
+            s_Version = RelayEvents::k_DisguiseCompromiseClearedSchemaVersion;
+            break;
+    }
+
+    PublishEnvelope(s_Type, s_Version, RelaySerialization::DisguisePayloadJson(p_Event));
+}
+
 void RelayAdapter::Publish(const MissionEvent& p_Event)
 {
     std::visit([this](const auto& p_Concrete) { Publish(p_Concrete); }, p_Event);

@@ -33,5 +33,8 @@ namespace RelaySerialization
     // Schema version 1 of contract.started and contract.ended.
     std::string ContractStartedPayloadJson(const ContractStartedEvent& p_Event);
     std::string ContractEndedPayloadJson(const ContractEndedEvent& p_Event);
+    // Schema version 1 of disguise.equipped / disguise.compromised / disguise.compromise_cleared:
+    // the same shape, plus "kind" on disguise.equipped only.
+    std::string DisguisePayloadJson(const DisguiseEvent& p_Event);
     std::string Envelope(const RelayEnvelope& p_Envelope);
 }

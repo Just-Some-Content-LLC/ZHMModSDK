@@ -15,6 +15,10 @@ namespace
         ActorPacified,
         ContractStarted,
         ContractEnded,
+        DisguiseInitial,
+        DisguiseChange,
+        DisguiseCompromised,
+        DisguiseCompromiseCleared,
     };
 
     struct SourceEvent
@@ -24,11 +28,18 @@ namespace
         TelemetryNormalizer::Gating gating;
     };
 
+    // Disguise rows are attempt-gated: every observation of these names across B0, B1 and B2 fell
+    // strictly inside the mission predicate window (design section 30.7), so the B1 rule applies and
+    // the outside-attempt counter is the instrument that would reveal a surprise.
     constexpr SourceEvent k_Sources[] = {
         {"Kill", Family::ActorDied, TelemetryNormalizer::Gating::AttemptGated},
         {"Pacify", Family::ActorPacified, TelemetryNormalizer::Gating::AttemptGated},
         {"ContractStart", Family::ContractStarted, TelemetryNormalizer::Gating::Ungated},
         {"ContractFailed", Family::ContractEnded, TelemetryNormalizer::Gating::Ungated},
+        {"StartingSuit", Family::DisguiseInitial, TelemetryNormalizer::Gating::AttemptGated},
+        {"Disguise", Family::DisguiseChange, TelemetryNormalizer::Gating::AttemptGated},
+        {"DisguiseBlown", Family::DisguiseCompromised, TelemetryNormalizer::Gating::AttemptGated},
+        {"BrokenDisguiseCleared", Family::DisguiseCompromiseCleared, TelemetryNormalizer::Gating::AttemptGated},
     };
 
     const SourceEvent* FindSource(std::string_view p_Name)
@@ -258,6 +269,12 @@ TelemetryNormalizer::Result TelemetryNormalizer::Normalize(const TelemetryObserv
         case Family::ActorPacified: s_Result = NormalizeActorOutcome(p_Observation, ActorOutcomeEvent::Kind::Pacified); break;
         case Family::ContractStarted: s_Result = NormalizeContractStarted(p_Observation); break;
         case Family::ContractEnded: s_Result = NormalizeContractEnded(p_Observation); break;
+        case Family::DisguiseInitial: s_Result = NormalizeDisguise(p_Observation, DisguiseEvent::Kind::Initial); break;
+        case Family::DisguiseChange: s_Result = NormalizeDisguise(p_Observation, DisguiseEvent::Kind::Change); break;
+        case Family::DisguiseCompromised: s_Result = NormalizeDisguise(p_Observation, DisguiseEvent::Kind::Compromised); break;
+        case Family::DisguiseCompromiseCleared:
+            s_Result = NormalizeDisguise(p_Observation, DisguiseEvent::Kind::CompromiseCleared);
+            break;
     }
 
     s_Result.gating = s_Source->gating;
@@ -343,6 +360,40 @@ TelemetryNormalizer::Result TelemetryNormalizer::NormalizeContractEnded(const Te
     ++m_Counters.normalized;
     s_Result.outcome = Outcome::Normalized;
     s_Result.contract_ended = std::move(s_Event);
+    return s_Result;
+}
+
+TelemetryNormalizer::Result TelemetryNormalizer::NormalizeDisguise(
+    const TelemetryObservation& p_Observation, DisguiseEvent::Kind p_Kind
+)
+{
+    const TelemetryValue& s_Value = p_Observation.value;
+
+    // All four source events carry the outfit definition repository id as the Value itself, a
+    // string (B0 corpus, 8/8). It is the event's subject, so it is required and non-empty. Its
+    // format is not checked: the engine's id form is evidence, not a contract.
+    if (s_Value.kind != TelemetryValue::Kind::String)
+        return Malformed(p_Observation, "Value is not a string");
+
+    if (s_Value.text.empty())
+        return Malformed(p_Observation, "Value (disguise repository id) is empty");
+
+    DisguiseEvent s_Event;
+    s_Event.kind = p_Kind;
+    s_Event.engine_event = p_Observation.name;
+    s_Event.disguise_repository_id = s_Value.text;
+
+    // Provenance from the stream envelope, as on actor outcomes: optional, carried when present.
+    if (!p_Observation.contract_session_id.empty())
+        s_Event.contract_session_id = p_Observation.contract_session_id;
+
+    if (p_Observation.has_timestamp)
+        s_Event.engine_timestamp_s = p_Observation.timestamp_s;
+
+    Result s_Result;
+    ++m_Counters.normalized;
+    s_Result.outcome = Outcome::Normalized;
+    s_Result.disguise = std::move(s_Event);
     return s_Result;
 }
 
