@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 
 #include <fmt/format.h>
 
@@ -20,6 +21,9 @@ namespace
         DisguiseChange,
         DisguiseCompromised,
         DisguiseCompromiseCleared,
+        ItemPickedUp,
+        ItemThrown,
+        ItemRemovedFromInventory,
     };
 
     struct SourceEvent
@@ -41,6 +45,13 @@ namespace
         {"Disguise", Family::DisguiseChange, TelemetryNormalizer::Gating::AttemptGated},
         {"DisguiseBlown", Family::DisguiseCompromised, TelemetryNormalizer::Gating::AttemptGated},
         {"BrokenDisguiseCleared", Family::DisguiseCompromiseCleared, TelemetryNormalizer::Gating::AttemptGated},
+        // Item rows (M2 B4, design section 38.5) are attempt-gated on the same evidence: all 24 B0
+        // payloads and every name-only observation (B1, B3, section 36) fell strictly inside the
+        // predicate window. ItemDropped and ItemDestroyed have no row: their payload shape and
+        // subject were never captured (section 38.9); they stay counted as unsupported.
+        {"ItemPickedUp", Family::ItemPickedUp, TelemetryNormalizer::Gating::AttemptGated},
+        {"ItemThrown", Family::ItemThrown, TelemetryNormalizer::Gating::AttemptGated},
+        {"ItemRemovedFromInventory", Family::ItemRemovedFromInventory, TelemetryNormalizer::Gating::AttemptGated},
     };
 
     const SourceEvent* FindSource(std::string_view p_Name)
@@ -220,6 +231,70 @@ namespace
         p_Out = s_Value->text;
         return true;
     }
+
+    // Optional array of strings: absent is fine; present but not an array of strings is malformed.
+    // The detail names the offending item's copied kind (bounded and escaped by DescribeValue).
+    bool ReadOptionalStringArray(
+        const TelemetryValue& p_Object, std::string_view p_Key, std::optional<std::vector<std::string>>& p_Out,
+        std::string& p_Detail
+    )
+    {
+        const auto* s_Value = p_Object.Find(p_Key);
+
+        if (!s_Value)
+        {
+            p_Out.reset();
+            return true;
+        }
+
+        if (s_Value->kind != TelemetryValue::Kind::Array)
+        {
+            p_Detail = fmt::format("field '{}' is not an array ({})", p_Key, DescribeValue(*s_Value));
+            return false;
+        }
+
+        std::vector<std::string> s_Items;
+
+        for (size_t i = 0; i < s_Value->items.size(); ++i)
+        {
+            const auto& s_Item = s_Value->items[i];
+
+            if (s_Item.kind != TelemetryValue::Kind::String)
+            {
+                p_Detail = fmt::format("field '{}' has a non-string item (item {} {})", p_Key, i, DescribeValue(s_Item));
+                return false;
+            }
+
+            s_Items.push_back(s_Item.text);
+        }
+
+        p_Out = std::move(s_Items);
+        return true;
+    }
+
+    // Item rows (M2 B4): the keys the normalizer reads from the item object, in the order the
+    // engine wrote them in B0. Category and ActionRewardType are deliberately not read (design
+    // section 38.5) and so are not listed either.
+    constexpr std::string_view k_ItemFields[] = {"RepositoryId", "InstanceId", "ItemName", "ItemType", "OnlineTraits"};
+
+    // The per-field diagnostic for a malformed item object (design section 38.7): each expected
+    // key's copied kind and, for an Unsupported value, the engine type name the intake copied.
+    // Reveals the engine type only for values the intake could not read; a value read as
+    // String/Number/Bool/Array/Object is reported by its Relay kind, which does not identify the
+    // exact engine type. Bounded: a fixed list of keys, no string values (only byte counts), type
+    // names escaped and capped by DescribeValue. No engine access, no new copy.
+    std::string DescribeItemFields(const TelemetryValue& p_Object)
+    {
+        std::string s_Out = "fields:";
+
+        for (size_t i = 0; i < std::size(k_ItemFields); ++i)
+        {
+            const auto* s_Value = p_Object.Find(k_ItemFields[i]);
+            s_Out += fmt::format("{} '{}' {}", i ? "," : "", k_ItemFields[i], s_Value ? DescribeValue(*s_Value) : "absent");
+        }
+
+        return s_Out;
+    }
 }
 
 bool TelemetryNormalizer::IsSupportedSourceName(std::string_view p_Name)
@@ -318,6 +393,11 @@ TelemetryNormalizer::Result TelemetryNormalizer::Normalize(const TelemetryObserv
         case Family::DisguiseCompromised: s_Result = NormalizeDisguise(p_Observation, DisguiseEvent::Kind::Compromised); break;
         case Family::DisguiseCompromiseCleared:
             s_Result = NormalizeDisguise(p_Observation, DisguiseEvent::Kind::CompromiseCleared);
+            break;
+        case Family::ItemPickedUp: s_Result = NormalizeItem(p_Observation, ItemEvent::Kind::PickedUp); break;
+        case Family::ItemThrown: s_Result = NormalizeItem(p_Observation, ItemEvent::Kind::Thrown); break;
+        case Family::ItemRemovedFromInventory:
+            s_Result = NormalizeItem(p_Observation, ItemEvent::Kind::RemovedFromInventory);
             break;
     }
 
@@ -440,6 +520,94 @@ TelemetryNormalizer::Result TelemetryNormalizer::NormalizeDisguise(
     ++m_Counters.normalized;
     s_Result.outcome = Outcome::Normalized;
     s_Result.disguise = std::move(s_Event);
+    return s_Result;
+}
+
+TelemetryNormalizer::Result TelemetryNormalizer::NormalizeItem(
+    const TelemetryObservation& p_Observation, ItemEvent::Kind p_Kind
+)
+{
+    const TelemetryValue& s_Value = p_Observation.value;
+
+    // All three source events carried the same seven-key object in B0 (24/24, design section
+    // 38.1). No item payload has ever crossed the typed intake, so every rejection below carries
+    // the per-field diagnostic of section 38.7: the copied kinds are the evidence the next step
+    // needs, and they are the only evidence a rejection can give.
+    if (s_Value.kind != TelemetryValue::Kind::Object)
+        return Malformed(p_Observation, fmt::format("Value is not an object ({})", DescribeValue(s_Value)));
+
+    auto s_Malformed = [&](const std::string& p_Detail) {
+        return Malformed(p_Observation, fmt::format("{}; {}", p_Detail, DescribeItemFields(s_Value)));
+    };
+
+    // Required: the definition id, the event's subject. Non-empty; its format is not checked (the
+    // engine's id form is evidence, not a contract), and it is accepted whether the intake copied
+    // a ZString or rendered a ZRepositoryID (section 35).
+    const auto* s_Id = s_Value.Find("RepositoryId");
+
+    if (!s_Id)
+        return s_Malformed("missing field 'RepositoryId'");
+
+    if (s_Id->kind != TelemetryValue::Kind::String)
+        return s_Malformed(fmt::format("field 'RepositoryId' is not a string ({})", DescribeValue(*s_Id)));
+
+    if (s_Id->text.empty())
+        return s_Malformed("field 'RepositoryId' is empty");
+
+    ItemEvent s_Event;
+    s_Event.kind = p_Kind;
+    s_Event.engine_event = p_Observation.name;
+    s_Event.item_repository_id = s_Id->text;
+
+    // Optional strings: absent is fine; present must be a string. InstanceId is the one field
+    // where an empty string is normal (24/24 sampled): it is carried only when non-empty, so the
+    // Relay event never shows an instance the engine did not name.
+    auto s_OptionalString = [&](std::string_view p_Key, std::optional<std::string>& p_Out, std::string& p_Detail) {
+        const auto* s_Field = s_Value.Find(p_Key);
+
+        if (!s_Field)
+        {
+            p_Out.reset();
+            return true;
+        }
+
+        if (s_Field->kind != TelemetryValue::Kind::String)
+        {
+            p_Detail = fmt::format("field '{}' is not a string ({})", p_Key, DescribeValue(*s_Field));
+            return false;
+        }
+
+        p_Out = s_Field->text;
+        return true;
+    };
+
+    std::string s_Detail;
+
+    if (!s_OptionalString("InstanceId", s_Event.item_instance_id, s_Detail)
+        || !s_OptionalString("ItemName", s_Event.item_name, s_Detail)
+        || !s_OptionalString("ItemType", s_Event.item_type, s_Detail)
+        || !ReadOptionalStringArray(s_Value, "OnlineTraits", s_Event.online_traits, s_Detail))
+    {
+        return s_Malformed(s_Detail);
+    }
+
+    if (s_Event.item_instance_id && s_Event.item_instance_id->empty())
+        s_Event.item_instance_id.reset();
+
+    // Deliberately not read: Category (null 24/24, unknown type) and ActionRewardType (constant,
+    // possibly an enum the intake copies as Unsupported). An unread field of any kind is harmless.
+
+    // Provenance from the stream envelope, as on actor outcomes and disguise: optional.
+    if (!p_Observation.contract_session_id.empty())
+        s_Event.contract_session_id = p_Observation.contract_session_id;
+
+    if (p_Observation.has_timestamp)
+        s_Event.engine_timestamp_s = p_Observation.timestamp_s;
+
+    Result s_Result;
+    ++m_Counters.normalized;
+    s_Result.outcome = Outcome::Normalized;
+    s_Result.item = std::move(s_Event);
     return s_Result;
 }
 

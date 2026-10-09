@@ -9,6 +9,7 @@ void RunRelayFrameTests();
 void RunContractLifecycleTests();
 void RunDisguiseTelemetryTests();
 void RunRepositoryIdTests();
+void RunItemTelemetryTests();
 
 int main()
 {
@@ -20,6 +21,7 @@ int main()
     RunContractLifecycleTests();
     RunDisguiseTelemetryTests();
     RunRepositoryIdTests();
+    RunItemTelemetryTests();
     RunTcpRelaySinkTests();
 
     if (g_Failures == 0)

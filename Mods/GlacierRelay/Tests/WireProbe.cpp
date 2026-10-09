@@ -11,8 +11,11 @@
 // the production frame sequencing with the recorded ContractStart/ContractFailed payloads;
 // "b3" replays B0 session 1's disguise occurrences (StartingSuit, Disguise, DisguiseBlown,
 // BrokenDisguiseCleared) in their recorded order, interleaved with the actor outcomes they sat
-// between, through a fresh entry, a restart and an exit to menu; "sleep:<ms>" waits. Exit code is 0
-// when the adapter's sequence count matches what was asked.
+// between, through a fresh entry, a restart and an exit to menu; "b4" replays B0 session 1's 24
+// item occurrences (ItemPickedUp, ItemRemovedFromInventory, ItemThrown) in their recorded order,
+// interleaved with the disguise occurrences and actor outcomes they sat between, with every
+// repository id (items and disguise) built from its 16-byte image through the production renderer;
+// "sleep:<ms>" waits. Exit code is 0 when the adapter's sequence count matches what was asked.
 
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +27,8 @@
 #include "Fixtures/B0ContractLifecycle.h"
 #include "Fixtures/B0Disguise.h"
 #include "Fixtures/B0DisguiseBytes.h"
+#include "Fixtures/B0ItemBytes.h"
+#include "Fixtures/B0Items.h"
 #include "MissionObserver.h"
 #include "RelayAdapter.h"
 #include "RelayFrame.h"
@@ -258,6 +263,160 @@ namespace
 
         return s_Published;
     }
+
+    // M2 B4. B0 session 1's item occurrences as the engine emitted them (design section 38.1),
+    // through the production frame sequencing, interleaved with the B3 vocabulary and the actor
+    // outcomes they sat between (regression coverage of the accepted rows in the same stream):
+    // wrench pickup, change, removal+throw in one drain, re-pickup, compromise, pacify, second
+    // removal+throw with the pacify 81 ms later, re-pickup, crowbar pickup, kill then clear, crowbar
+    // removal+throw, re-pickup, second change, three pickups in one drain, compromise, clear, knife
+    // and cleaver pickups, lead-pipe removal+throw with the pacify 80 ms later, knife removal+throw
+    // with the kill 175 ms later, knife re-pickup, propane pickup, propane removal+throw; restart
+    // with the recorded ContractFailed/ContractStart order, the second session's StartingSuit, exit
+    // to menu. Every item and disguise event is inside an attempt, as observed. 45 envelopes.
+    int ReplayB4(RelayAdapter& p_Adapter)
+    {
+        const char* s_Paris = "assembly:/_PRO/Scenes/Missions/Paris/_Scene_FashionShowHit_01.entity";
+        const char* s_Menu = "assembly:/_PRO/Scenes/Frontend/MainMenu.entity";
+        const char* s_SessionA = "2516109628137904204-c00b2d17-08b1-4949-9f9d-5f68b691f40f";
+        const char* s_SessionB = "2516109618691980006-9666b5ad-6a4f-44bb-b5fb-ff86bb3a8d76";
+
+        TelemetryQueue s_Queue(256);
+        TelemetryNormalizer s_Normalizer;
+        MissionObserver s_Observer;
+        int s_Published = 0;
+
+        auto s_Frame = [&](const SceneState& p_Scene, const char* p_SessionId) {
+            std::optional<std::string> s_SessionId;
+            if (p_SessionId)
+                s_SessionId = p_SessionId;
+
+            const auto s_Result = RelayFrame::Process(
+                s_Queue, s_Normalizer, s_Observer, &p_Adapter, p_Scene, s_SessionId,
+                [](const std::string& p_Line) { std::printf("b4: %s\n", p_Line.c_str()); }
+            );
+
+            const int s_Count = static_cast<int>(s_Result.outcomes_published + s_Result.ungated_published + (s_Result.edge_published ? 1 : 0));
+            s_Published += s_Count;
+
+            if (s_Count)
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        };
+
+        auto s_Capture = [&](const char* p_Json, uint32_t p_Index) {
+            s_Queue.Push(TestJson::ObservationFromRecordedEvent(p_Json, p_Index));
+        };
+
+        const auto& s_Contract = B0Fixtures::k_ContractLifecycle;
+        const auto& s_Disguise = B0Fixtures::k_Disguise;
+        const auto& s_Actor = B0Fixtures::k_ActorOutcomes;
+        const auto& s_Items = B0Fixtures::k_Items;
+        const auto s_Playing = Scene("mission", 8, true, s_Paris, "Peacock");
+
+        auto s_Disguised = [&](size_t p_Index) {
+            auto s_Obs = TestJson::ObservationFromRecordedEvent(s_Disguise[p_Index].json, static_cast<uint32_t>(s_Disguise[p_Index].event_index));
+            s_Obs.value = TelemetryValue{};
+            s_Obs.value.kind = TelemetryValue::Kind::String;
+            s_Obs.value.text = RepositoryId::FromLittleEndianBytes(B0Fixtures::k_DisguiseImages[p_Index]->le_bytes).ToDashedLowercase();
+            s_Queue.Push(s_Obs);
+        };
+
+        // The item object's envelope and other fields come from the recorded JSON; its
+        // RepositoryId is rebuilt from the 16-byte image through the production renderer, so the
+        // comparison against BEAM's decode checks the rendering of all seven definitions end to end.
+        auto s_Item = [&](size_t p_Index) {
+            auto s_Obs = TestJson::ObservationFromRecordedEvent(s_Items[p_Index].json, static_cast<uint32_t>(s_Items[p_Index].event_index));
+            for (auto& s_Field : s_Obs.value.fields)
+                if (s_Field.first == "RepositoryId")
+                {
+                    s_Field.second = TelemetryValue{};
+                    s_Field.second.kind = TelemetryValue::Kind::String;
+                    s_Field.second.text = RepositoryId::FromLittleEndianBytes(B0Fixtures::k_ItemImages[p_Index]->le_bytes).ToDashedLowercase();
+                }
+            s_Queue.Push(s_Obs);
+        };
+
+        s_Frame(Scene("", 8, true, s_Menu, ""), nullptr);
+        s_Frame(Scene("mission", 5, false, s_Paris, "Peacock"), nullptr);
+        s_Capture(s_Contract[B0Fixtures::k_ContractStartA].json, 2);
+        s_Frame(Scene("mission", 7, false, s_Paris, "Peacock"), nullptr);      // contract.started
+        s_Frame(s_Playing, s_SessionA);                                         // mission.playing
+        s_Disguised(B0Fixtures::k_StartingSuitA);
+        s_Frame(s_Playing, nullptr);                                            // disguise.equipped (initial)
+        s_Item(B0Fixtures::k_ItemWrenchPickup1);
+        s_Frame(s_Playing, nullptr);                                            // item.picked_up
+        s_Disguised(B0Fixtures::k_DisguiseChange1);
+        s_Frame(s_Playing, nullptr);                                            // disguise.equipped (change)
+        s_Item(B0Fixtures::k_ItemWrenchRemoved1);
+        s_Item(B0Fixtures::k_ItemWrenchThrown1);
+        s_Frame(s_Playing, nullptr);                                            // item.removed_from_inventory, item.thrown
+        s_Item(B0Fixtures::k_ItemWrenchPickup2);
+        s_Frame(s_Playing, nullptr);                                            // item.picked_up
+        s_Disguised(B0Fixtures::k_DisguiseBlown1);
+        s_Frame(s_Playing, nullptr);                                            // disguise.compromised
+        s_Capture(s_Actor[0].json, 35);                                         // Pacify Parker
+        s_Frame(s_Playing, nullptr);                                            // actor.pacified
+        s_Item(B0Fixtures::k_ItemWrenchRemoved2);
+        s_Item(B0Fixtures::k_ItemWrenchThrown2);
+        s_Capture(s_Actor[1].json, 40);                                         // Pacify Rousseau, 81 ms later
+        s_Frame(s_Playing, nullptr);                                            // removal, throw, actor.pacified
+        s_Item(B0Fixtures::k_ItemWrenchPickup3);
+        s_Frame(s_Playing, nullptr);                                            // item.picked_up
+        s_Item(B0Fixtures::k_ItemCrowbarPickup1);
+        s_Frame(s_Playing, nullptr);                                            // item.picked_up
+        s_Capture(s_Actor[3].json, 56);                                         // Kill Ducloitre
+        s_Disguised(B0Fixtures::k_DisguiseCleared1);                            // 9 ms later
+        s_Frame(s_Playing, nullptr);                                            // actor.died, disguise.compromise_cleared
+        s_Item(B0Fixtures::k_ItemCrowbarRemoved1);
+        s_Item(B0Fixtures::k_ItemCrowbarThrown1);
+        s_Frame(s_Playing, nullptr);                                            // removal, throw
+        s_Item(B0Fixtures::k_ItemCrowbarPickup2);
+        s_Frame(s_Playing, nullptr);                                            // item.picked_up
+        s_Disguised(B0Fixtures::k_DisguiseChange2);
+        s_Frame(s_Playing, nullptr);                                            // disguise.equipped (change)
+        s_Item(B0Fixtures::k_ItemCrowbarPickup3);
+        s_Item(B0Fixtures::k_ItemRatPoisonPickup);
+        s_Item(B0Fixtures::k_ItemLeadPipePickup);
+        s_Frame(s_Playing, nullptr);                                            // 3x item.picked_up
+        s_Disguised(B0Fixtures::k_DisguiseBlown2);
+        s_Frame(s_Playing, nullptr);                                            // disguise.compromised
+        s_Disguised(B0Fixtures::k_DisguiseCleared2);
+        s_Frame(s_Playing, nullptr);                                            // disguise.compromise_cleared
+        s_Item(B0Fixtures::k_ItemKnifePickup1);
+        s_Item(B0Fixtures::k_ItemCleaverPickup);
+        s_Frame(s_Playing, nullptr);                                            // 2x item.picked_up
+        s_Item(B0Fixtures::k_ItemLeadPipeRemoved);
+        s_Item(B0Fixtures::k_ItemLeadPipeThrown);
+        s_Capture(s_Actor[8].json, 114);                                        // Pacify Marcheterre, 80 ms later
+        s_Frame(s_Playing, nullptr);                                            // removal, throw, actor.pacified
+        s_Item(B0Fixtures::k_ItemKnifeRemoved);
+        s_Item(B0Fixtures::k_ItemKnifeThrown);
+        s_Capture(s_Actor[9].json, 120);                                        // Kill Mills, 175 ms later
+        s_Frame(s_Playing, nullptr);                                            // removal, throw, actor.died
+        s_Item(B0Fixtures::k_ItemKnifePickup2);
+        s_Frame(s_Playing, nullptr);                                            // item.picked_up
+        s_Item(B0Fixtures::k_ItemPropanePickup);
+        s_Frame(s_Playing, nullptr);                                            // item.picked_up
+        s_Item(B0Fixtures::k_ItemPropaneRemoved);
+        s_Item(B0Fixtures::k_ItemPropaneThrown);
+        s_Frame(s_Playing, nullptr);                                            // removal, throw
+        s_Capture(s_Contract[B0Fixtures::k_ContractFailedRestartA].json, 196);  // ~1.9 s before the fall
+        s_Frame(s_Playing, nullptr);                                            // contract.ended (restart)
+        s_Frame(Scene("mission", 8, false, s_Paris, "Peacock"), s_SessionB);    // mission.stopped
+        s_Frame(Scene("mission", 0, false, s_Paris, "Peacock"), nullptr);
+        s_Frame(Scene("mission", 7, false, s_Paris, "Peacock"), nullptr);
+        s_Frame(s_Playing, s_SessionB);                                         // mission.playing
+        s_Capture(s_Contract[B0Fixtures::k_ContractStartB].json, 199);          // same engine frame, after the rise
+        s_Frame(s_Playing, nullptr);                                            // contract.started
+        s_Disguised(B0Fixtures::k_StartingSuitB);
+        s_Frame(s_Playing, nullptr);                                            // disguise.equipped (initial)
+        s_Frame(Scene("mission", 8, false, s_Paris, "Peacock"), s_SessionB);    // mission.stopped
+        s_Capture(s_Contract[B0Fixtures::k_ContractFailedExitB].json, 211);     // same engine frame, after the fall
+        s_Frame(Scene("mission", 2, false, s_Paris, "Peacock"), nullptr);       // contract.ended (exit)
+        s_Frame(Scene("", 8, true, s_Menu, ""), nullptr);
+
+        return s_Published;
+    }
 }
 
 int main(int p_Argc, char** p_Argv)
@@ -325,6 +484,10 @@ int main(int p_Argc, char** p_Argv)
         else if (s_Step == "b3")
         {
             s_Expected += ReplayB3(s_Adapter);
+        }
+        else if (s_Step == "b4")
+        {
+            s_Expected += ReplayB4(s_Adapter);
         }
         else if (s_Step == "stop")
         {

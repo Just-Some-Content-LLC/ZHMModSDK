@@ -36,5 +36,8 @@ namespace RelaySerialization
     // Schema version 1 of disguise.equipped / disguise.compromised / disguise.compromise_cleared:
     // the same shape, plus "kind" on disguise.equipped only.
     std::string DisguisePayloadJson(const DisguiseEvent& p_Event);
+    // Schema version 1 of item.picked_up / item.thrown / item.removed_from_inventory: one shape;
+    // optional fields are absent, never empty or null.
+    std::string ItemPayloadJson(const ItemEvent& p_Event);
     std::string Envelope(const RelayEnvelope& p_Envelope);
 }

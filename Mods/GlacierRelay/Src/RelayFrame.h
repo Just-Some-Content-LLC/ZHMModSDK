@@ -32,11 +32,15 @@
 // against the pre-edge state and publishes before this frame's edge; an occurrence the engine
 // emits later in the same frame is drained on the next processed frame, after the edge, and for an
 // attempt-gated row that is "outside attempt": counted and logged, never published.
+//
+// M2 B4: item events are attempt-gated on the same evidence and follow the same rules; each
+// occurrence the engine emits is one publication (a removal and a throw drained in one frame are
+// two consecutive sequences, as captured).
 namespace RelayFrame
 {
     struct Result
     {
-        size_t outcomes_published = 0; // attempt-gated events published (actor outcomes, disguise)
+        size_t outcomes_published = 0; // attempt-gated events published (actor outcomes, disguise, items)
         size_t ungated_published = 0;  // ungated events published (contract lifecycle)
         size_t outside_attempt = 0;    // attempt-gated and normalized, but no attempt was open: not published
         size_t malformed = 0;

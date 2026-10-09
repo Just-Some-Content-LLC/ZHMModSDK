@@ -62,6 +62,12 @@ RelayFrame::Result RelayFrame::Process(
             p_Adapter->Publish(*s_Normalized.disguise);
             ++s_Result.outcomes_published;
         }
+        else if (s_Normalized.item)
+        {
+            // Attempt-gated like actor outcomes and disguise (M2 B4): the gate above already applied.
+            p_Adapter->Publish(*s_Normalized.item);
+            ++s_Result.outcomes_published;
+        }
         else if (s_Normalized.contract_started)
         {
             p_Adapter->Publish(*s_Normalized.contract_started);

@@ -58,6 +58,22 @@ namespace RelayEvents
     constexpr const char* k_DisguiseCompromiseCleared = "disguise.compromise_cleared";
     constexpr int k_DisguiseCompromiseClearedSchemaVersion = 1;
 
+    // Items, normalized from Glacier's engine-authored telemetry (M2 B4, design section 38). Each
+    // is one occurrence the engine reported about an item *definition* (its repository id):
+    // item.picked_up: the player picked an item up ("ItemPickedUp"). item.thrown: the player
+    // threw one ("ItemThrown"). item.removed_from_inventory: the engine removed one from the
+    // player's inventory ("ItemRemovedFromInventory"; the engine's own phrase, kept). Every
+    // occurrence is published as emitted: a throw and the removal the engine emits beside it are
+    // two events, never merged, paired or inferred from each other. None of them says what is held,
+    // what the inventory contains, whether an item was recovered, or which instance it was unless
+    // the engine named one.
+    constexpr const char* k_ItemPickedUp = "item.picked_up";
+    constexpr int k_ItemPickedUpSchemaVersion = 1;
+    constexpr const char* k_ItemThrown = "item.thrown";
+    constexpr int k_ItemThrownSchemaVersion = 1;
+    constexpr const char* k_ItemRemovedFromInventory = "item.removed_from_inventory";
+    constexpr int k_ItemRemovedFromInventorySchemaVersion = 1;
+
     // Provenance value carried by events normalized from the telemetry stream.
     constexpr const char* k_SourceEngineTelemetry = "engine_telemetry";
 }
@@ -190,4 +206,34 @@ struct DisguiseEvent
     std::optional<double> engine_timestamp_s;
 
     bool operator==(const DisguiseEvent&) const = default;
+};
+
+// One item occurrence, schema version 1 for each of the three Relay event types (M2 B4, design
+// section 38.5). The kind selects the event type; engine_event is provenance. item_repository_id
+// is the engine's item definition id verbatim (the subject; a definition, never an instance: two
+// wrenches are indistinguishable by it). item_instance_id is carried only when the engine sent a
+// non-empty one (empty in 24/24 sampled world-item events); it is never fabricated from order,
+// time or proximity. item_name and item_type are the engine's display strings on this build,
+// carried verbatim as evidence (including "Unrecognized Item type"), never used as identity.
+// online_traits is the engine's trait list verbatim, order kept.
+struct ItemEvent
+{
+    enum class Kind
+    {
+        PickedUp,             // item.picked_up               (ItemPickedUp)
+        Thrown,               // item.thrown                  (ItemThrown)
+        RemovedFromInventory, // item.removed_from_inventory  (ItemRemovedFromInventory)
+    };
+
+    Kind kind = Kind::PickedUp;
+    std::string engine_event; // provenance: the Glacier event name
+    std::string item_repository_id;
+    std::optional<std::string> item_instance_id;
+    std::optional<std::string> item_name;
+    std::optional<std::string> item_type;
+    std::optional<std::vector<std::string>> online_traits;
+    std::optional<std::string> contract_session_id;
+    std::optional<double> engine_timestamp_s;
+
+    bool operator==(const ItemEvent&) const = default;
 };

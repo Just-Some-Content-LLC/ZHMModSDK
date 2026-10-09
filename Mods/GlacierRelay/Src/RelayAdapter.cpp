@@ -108,6 +108,28 @@ void RelayAdapter::Publish(const DisguiseEvent& p_Event)
     PublishEnvelope(s_Type, s_Version, RelaySerialization::DisguisePayloadJson(p_Event));
 }
 
+void RelayAdapter::Publish(const ItemEvent& p_Event)
+{
+    const char* s_Type = RelayEvents::k_ItemPickedUp;
+    int s_Version = RelayEvents::k_ItemPickedUpSchemaVersion;
+
+    switch (p_Event.kind)
+    {
+        case ItemEvent::Kind::PickedUp:
+            break;
+        case ItemEvent::Kind::Thrown:
+            s_Type = RelayEvents::k_ItemThrown;
+            s_Version = RelayEvents::k_ItemThrownSchemaVersion;
+            break;
+        case ItemEvent::Kind::RemovedFromInventory:
+            s_Type = RelayEvents::k_ItemRemovedFromInventory;
+            s_Version = RelayEvents::k_ItemRemovedFromInventorySchemaVersion;
+            break;
+    }
+
+    PublishEnvelope(s_Type, s_Version, RelaySerialization::ItemPayloadJson(p_Event));
+}
+
 void RelayAdapter::Publish(const MissionEvent& p_Event)
 {
     std::visit([this](const auto& p_Concrete) { Publish(p_Concrete); }, p_Event);
