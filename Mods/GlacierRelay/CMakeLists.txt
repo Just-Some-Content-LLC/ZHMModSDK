@@ -25,6 +25,8 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/RelayFrame.h
         Src/RelayLog.cpp
         Src/RelayLog.h
+        Src/RepositoryId.cpp
+        Src/RepositoryId.h
         Src/SceneState.h
         Src/TcpRelaySink.cpp
         Src/TcpRelaySink.h
@@ -68,6 +70,7 @@ add_executable(GlacierRelayTests
         Tests/MissionObserverTests.cpp
         Tests/RelayAdapterTests.cpp
         Tests/RelayFrameTests.cpp
+        Tests/RepositoryIdTests.cpp
         Tests/TcpRelaySinkTests.cpp
         Tests/TelemetryNormalizerTests.cpp
         Tests/TelemetryQueueTests.cpp
@@ -76,6 +79,7 @@ add_executable(GlacierRelayTests
         Tests/Fixtures/B0ActorOutcomes.h
         Tests/Fixtures/B0ContractLifecycle.h
         Tests/Fixtures/B0Disguise.h
+        Tests/Fixtures/B0DisguiseBytes.h
 )
 
 target_include_directories(GlacierRelayTests PRIVATE

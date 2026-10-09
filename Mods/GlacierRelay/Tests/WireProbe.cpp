@@ -23,10 +23,12 @@
 #include "Fixtures/B0ActorOutcomes.h"
 #include "Fixtures/B0ContractLifecycle.h"
 #include "Fixtures/B0Disguise.h"
+#include "Fixtures/B0DisguiseBytes.h"
 #include "MissionObserver.h"
 #include "RelayAdapter.h"
 #include "RelayFrame.h"
 #include "RelayLog.h"
+#include "RepositoryId.h"
 #include "TcpRelaySink.h"
 #include "TelemetryNormalizer.h"
 #include "TelemetryQueue.h"
@@ -200,8 +202,16 @@ namespace
         const auto& s_Actor = B0Fixtures::k_ActorOutcomes;
         const auto s_Playing = Scene("mission", 8, true, s_Paris, "Peacock");
 
+        // Since the section 35 intake correction the disguise Value is built from the 16-byte
+        // ZRepositoryID image through the production conversion, not lifted from the JSON corpus,
+        // so the wire comparison against the committed fixture (B0 strings) checks the rendering
+        // end to end. The envelope fields still come from the recorded JSON.
         auto s_Disguised = [&](size_t p_Index) {
-            s_Capture(s_Disguise[p_Index].json, static_cast<uint32_t>(s_Disguise[p_Index].event_index));
+            auto s_Obs = TestJson::ObservationFromRecordedEvent(s_Disguise[p_Index].json, static_cast<uint32_t>(s_Disguise[p_Index].event_index));
+            s_Obs.value = TelemetryValue{};
+            s_Obs.value.kind = TelemetryValue::Kind::String;
+            s_Obs.value.text = RepositoryId::FromLittleEndianBytes(B0Fixtures::k_DisguiseImages[p_Index]->le_bytes).ToDashedLowercase();
+            s_Queue.Push(s_Obs);
         };
 
         s_Frame(Scene("", 8, true, s_Menu, ""), nullptr);

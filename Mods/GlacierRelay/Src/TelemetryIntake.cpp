@@ -1,16 +1,47 @@
 #include "TelemetryIntake.h"
 
 #include <cstring>
+#include <type_traits>
 
 #include "Glacier/Reflection.h"
 #include "Glacier/TArray.h"
 #include "Glacier/ZObject.h"
+#include "Glacier/ZPrimitives.h"
 #include "Glacier/ZString.h"
 
+#include "RepositoryId.h"
 #include "TelemetryNormalizer.h"
+
+// The SDK's declaration of the engine's GUID value, pinned here because the branch below reads it
+// by field (M2 design, section 35). If the SDK ever changes the type, this fails to compile instead
+// of silently rendering something else. Not pinned, and only a run can show: that the engine's
+// ZRepositoryID at runtime has this layout, and that its own JSON writer renders the same text.
+static_assert(sizeof(ZGuid) == RepositoryId::k_Bytes, "ZGuid is expected to be a 16-byte GUID");
+static_assert(sizeof(ZRepositoryID) == RepositoryId::k_Bytes, "ZRepositoryID is expected to add nothing to ZGuid");
+static_assert(std::is_base_of_v<ZGuid, ZRepositoryID>, "ZRepositoryID is expected to be a ZGuid");
+static_assert(!std::is_polymorphic_v<ZRepositoryID>, "ZRepositoryID is expected to have no vtable");
+static_assert(std::is_same_v<decltype(ZGuid::data1), uint32_t>, "ZGuid::data1 is expected to be uint32");
+static_assert(std::is_same_v<decltype(ZGuid::data2), uint16_t>, "ZGuid::data2 is expected to be uint16");
+static_assert(std::is_same_v<decltype(ZGuid::data3), uint16_t>, "ZGuid::data3 is expected to be uint16");
+static_assert(std::is_same_v<decltype(ZGuid::data4), uint8_t[8]>, "ZGuid::data4 is expected to be 8 bytes");
 
 namespace
 {
+    // The only SDK access the repository-id branch makes: the four GUID fields, by name, into the
+    // owned engine-independent value. No ToString, no string allocation, no byte-order guess.
+    RepositoryId CopyRepositoryId(const ZRepositoryID& p_Id)
+    {
+        RepositoryId s_Id;
+        s_Id.data1 = p_Id.data1;
+        s_Id.data2 = p_Id.data2;
+        s_Id.data3 = p_Id.data3;
+
+        for (size_t i = 0; i < s_Id.data4.size(); ++i)
+            s_Id.data4[i] = p_Id.data4[i];
+
+        return s_Id;
+    }
+
     // The engine's reflection type name for a value, or "" when it has none.
     std::string_view TypeNameOf(const ZObjectRef& p_Value)
     {
@@ -84,6 +115,18 @@ namespace
         {
             s_Out.kind = TelemetryValue::Kind::String;
             s_Out.text = CopyString(*static_cast<const ZString*>(s_Data), p_Budget.truncated);
+            return s_Out;
+        }
+
+        // The disguise events carry their outfit definition id as this exact reflection type
+        // (confirmed at runtime, M2 design section 34). It is rendered as the dashed lowercase
+        // GUID text the engine's own JSON writer produced for the B0 corpus, so the normalizer's
+        // string contract is met without the engine allocating anything. Exact name only: ZGuid
+        // and any other GUID-like type still fall through to Unsupported.
+        if (s_TypeName == "ZRepositoryID")
+        {
+            s_Out.kind = TelemetryValue::Kind::String;
+            s_Out.text = CopyRepositoryId(*static_cast<const ZRepositoryID*>(s_Data)).ToDashedLowercase();
             return s_Out;
         }
 
