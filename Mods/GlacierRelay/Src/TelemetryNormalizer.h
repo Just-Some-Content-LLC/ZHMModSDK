@@ -18,8 +18,10 @@
 //
 // Each table row also states how the plugin gates publication (M2 design, section 27.5):
 // attempt-gated events (actor outcomes) are published only while the mission predicate is true;
-// ungated events (contract lifecycle) are published whenever captured and valid, because Glacier
-// emits them on both sides of the predicate's edges. The gate is a per-row fact, not a framework;
+// ungated events (contract lifecycle; the objective occurrence since M2 B5, whose placement at a
+// completion transition is unobserved and must be preserved with its payload wherever it lands)
+// are published whenever captured and valid, because Glacier emits them on both sides of the
+// predicate's edges. The gate is a per-row fact, not a framework;
 // no grace window, no native attachment of an event to an attempt.
 class TelemetryNormalizer
 {
@@ -47,6 +49,7 @@ public:
         std::optional<ContractEndedEvent> contract_ended;     // Normalized, ungated
         std::optional<DisguiseEvent> disguise;                // Normalized, attempt-gated (M2 B3)
         std::optional<ItemEvent> item;                        // Normalized, attempt-gated (M2 B4)
+        std::optional<ObjectiveEvent> objective;              // Normalized, ungated (M2 B5)
         std::string detail;                                // Malformed: the field and what was wrong
     };
 
@@ -85,6 +88,7 @@ private:
     Result NormalizeContractEnded(const TelemetryObservation& p_Observation);
     Result NormalizeDisguise(const TelemetryObservation& p_Observation, DisguiseEvent::Kind p_Kind);
     Result NormalizeItem(const TelemetryObservation& p_Observation, ItemEvent::Kind p_Kind);
+    Result NormalizeObjective(const TelemetryObservation& p_Observation);
     Result Malformed(const TelemetryObservation& p_Observation, const std::string& p_Detail);
     void Count(std::map<std::string, uint64_t>& p_Map, const std::string& p_Name);
 

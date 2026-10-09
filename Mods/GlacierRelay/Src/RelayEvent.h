@@ -74,6 +74,15 @@ namespace RelayEvents
     constexpr const char* k_ItemRemovedFromInventory = "item.removed_from_inventory";
     constexpr int k_ItemRemovedFromInventorySchemaVersion = 1;
 
+    // Objectives, normalized from Glacier's engine-authored telemetry (M2 B5, design section 42).
+    // objective.completed: the engine reported that one objective (by an opaque identifier it
+    // attached) was completed ("ObjectiveCompleted"). It says nothing about the mission, about
+    // other objectives, or about which actor the objective concerned. Published ungated: the
+    // engine may emit it at a completion transition after the mission predicate falls, and the
+    // occurrence is preserved with its payload; attribution to an attempt is BEAM's.
+    constexpr const char* k_ObjectiveCompleted = "objective.completed";
+    constexpr int k_ObjectiveCompletedSchemaVersion = 1;
+
     // Provenance value carried by events normalized from the telemetry stream.
     constexpr const char* k_SourceEngineTelemetry = "engine_telemetry";
 }
@@ -236,4 +245,23 @@ struct ItemEvent
     std::optional<double> engine_timestamp_s;
 
     bool operator==(const ItemEvent&) const = default;
+};
+
+// One objective occurrence, schema version 1 (M2 B5, design section 42.6). objective_id is the
+// engine's identifier for the completed objective, verbatim and opaque: not a Relay identity and
+// not assumed to be an actor, repository, item, contract or session id. objective_type and
+// objective_category are the engine's strings as sent ("kill", "primary" observed);
+// exclude_from_scoring is carried when present, false included. The envelope session is
+// evidence for BEAM's attribution, never attachment by itself.
+struct ObjectiveEvent
+{
+    std::string engine_event; // provenance: the Glacier event name ("ObjectiveCompleted")
+    std::string objective_id;
+    std::optional<std::string> objective_type;
+    std::optional<std::string> objective_category;
+    std::optional<bool> exclude_from_scoring;
+    std::optional<std::string> contract_session_id;
+    std::optional<double> engine_timestamp_s;
+
+    bool operator==(const ObjectiveEvent&) const = default;
 };

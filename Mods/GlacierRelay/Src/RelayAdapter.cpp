@@ -130,6 +130,14 @@ void RelayAdapter::Publish(const ItemEvent& p_Event)
     PublishEnvelope(s_Type, s_Version, RelaySerialization::ItemPayloadJson(p_Event));
 }
 
+void RelayAdapter::Publish(const ObjectiveEvent& p_Event)
+{
+    PublishEnvelope(
+        RelayEvents::k_ObjectiveCompleted, RelayEvents::k_ObjectiveCompletedSchemaVersion,
+        RelaySerialization::ObjectivePayloadJson(p_Event)
+    );
+}
+
 void RelayAdapter::Publish(const MissionEvent& p_Event)
 {
     std::visit([this](const auto& p_Concrete) { Publish(p_Concrete); }, p_Event);

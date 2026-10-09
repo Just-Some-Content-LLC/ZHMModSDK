@@ -15,6 +15,9 @@
 // item occurrences (ItemPickedUp, ItemRemovedFromInventory, ItemThrown) in their recorded order,
 // interleaved with the disguise occurrences and actor outcomes they sat between, with every
 // repository id (items and disguise) built from its 16-byte image through the production renderer;
+// "b5" replays the B0 objective occurrence beside the accepted vocabulary and the section 42.7
+// attribution cases (an objective drained after the fall, one before the restarted attempt's
+// ContractStart, a delayed one carrying the previous session, one with the matching session);
 // "sleep:<ms>" waits. Exit code is 0 when the adapter's sequence count matches what was asked.
 
 #include <cstdio>
@@ -29,6 +32,7 @@
 #include "Fixtures/B0DisguiseBytes.h"
 #include "Fixtures/B0ItemBytes.h"
 #include "Fixtures/B0Items.h"
+#include "Fixtures/B0Objectives.h"
 #include "MissionObserver.h"
 #include "RelayAdapter.h"
 #include "RelayFrame.h"
@@ -417,6 +421,112 @@ namespace
 
         return s_Published;
     }
+
+    // M2 B5. The B0 objective occurrence through the production frame sequencing beside the accepted
+    // rows, then the attribution cases of design section 42.7, each a distinct placement that BEAM
+    // must preserve rather than resolve:
+    //   attempt 1 (session A): contract.started, mission.playing, StartingSuit, Kill Novikov with
+    //     the ObjectiveCompleted 13 ms later in one drain, a wrench pickup (B4), ContractFailed
+    //     (restart), the fall; then an objective presented AFTER the fall frame's drain -> published
+    //     after mission.stopped with its payload (BEAM: no open attempt -> unattributed);
+    //   attempt 2 (session B, restart path): the rise; an objective carrying session A arrives
+    //     BEFORE ContractStart(B) is captured (BEAM: attached by order while the attempt has no paired
+    //     session); ContractStart(B) pairs the attempt; a delayed objective carrying session A (BEAM:
+    //     session contradiction -> unattributed, never moved to attempt 1); an objective carrying
+    //     session B (attached); the fall; ContractFailed (exit). 16 envelopes.
+    int ReplayB5(RelayAdapter& p_Adapter)
+    {
+        const char* s_Paris = "assembly:/_PRO/Scenes/Missions/Paris/_Scene_FashionShowHit_01.entity";
+        const char* s_Menu = "assembly:/_PRO/Scenes/Frontend/MainMenu.entity";
+        const char* s_SessionA = "2516109628137904204-c00b2d17-08b1-4949-9f9d-5f68b691f40f";
+        const char* s_SessionB = "2516109618691980006-9666b5ad-6a4f-44bb-b5fb-ff86bb3a8d76";
+
+        TelemetryQueue s_Queue(256);
+        TelemetryNormalizer s_Normalizer;
+        MissionObserver s_Observer;
+        int s_Published = 0;
+
+        auto s_Frame = [&](const SceneState& p_Scene, const char* p_SessionId) {
+            std::optional<std::string> s_SessionId;
+            if (p_SessionId)
+                s_SessionId = p_SessionId;
+
+            const auto s_Result = RelayFrame::Process(
+                s_Queue, s_Normalizer, s_Observer, &p_Adapter, p_Scene, s_SessionId,
+                [](const std::string& p_Line) { std::printf("b5: %s\n", p_Line.c_str()); }
+            );
+
+            const int s_Count = static_cast<int>(s_Result.outcomes_published + s_Result.ungated_published + (s_Result.edge_published ? 1 : 0));
+            s_Published += s_Count;
+
+            if (s_Count)
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        };
+
+        auto s_Capture = [&](const char* p_Json, uint32_t p_Index) {
+            s_Queue.Push(TestJson::ObservationFromRecordedEvent(p_Json, p_Index));
+        };
+
+        const auto& s_Contract = B0Fixtures::k_ContractLifecycle;
+        const auto& s_Disguise = B0Fixtures::k_Disguise;
+        const auto& s_Actor = B0Fixtures::k_ActorOutcomes;
+        const auto s_Playing = Scene("mission", 8, true, s_Paris, "Peacock");
+
+        auto s_Disguised = [&](size_t p_Index) {
+            auto s_Obs = TestJson::ObservationFromRecordedEvent(s_Disguise[p_Index].json, static_cast<uint32_t>(s_Disguise[p_Index].event_index));
+            s_Obs.value = TelemetryValue{};
+            s_Obs.value.kind = TelemetryValue::Kind::String;
+            s_Obs.value.text = RepositoryId::FromLittleEndianBytes(B0Fixtures::k_DisguiseImages[p_Index]->le_bytes).ToDashedLowercase();
+            s_Queue.Push(s_Obs);
+        };
+
+        // The recorded objective, optionally re-stamped with another session and id (synthetic
+        // placements; the Value shape and timestamp stay the corpus's).
+        auto s_Objective = [&](uint32_t p_Index, const char* p_Session, const char* p_Id) {
+            auto s_Obs = TestJson::ObservationFromRecordedEvent(B0Fixtures::k_Objectives[0].json, p_Index);
+            if (p_Session)
+                s_Obs.contract_session_id = p_Session;
+            if (p_Id)
+                for (auto& s_Field : s_Obs.value.fields)
+                    if (s_Field.first == "Id")
+                        s_Field.second.text = p_Id;
+            s_Queue.Push(s_Obs);
+        };
+
+        s_Frame(Scene("", 8, true, s_Menu, ""), nullptr);
+        s_Frame(Scene("mission", 5, false, s_Paris, "Peacock"), nullptr);
+        s_Capture(s_Contract[B0Fixtures::k_ContractStartA].json, 2);
+        s_Frame(Scene("mission", 7, false, s_Paris, "Peacock"), nullptr);      // contract.started (A)
+        s_Frame(s_Playing, s_SessionA);                                         // mission.playing
+        s_Disguised(B0Fixtures::k_StartingSuitA);
+        s_Frame(s_Playing, nullptr);                                            // disguise.equipped (initial)
+        s_Capture(s_Actor[13].json, 162);                                       // Kill Novikov (target)
+        s_Objective(163, nullptr, nullptr);                                     // ObjectiveCompleted, 13 ms later
+        s_Frame(s_Playing, nullptr);                                            // actor.died, objective.completed
+        s_Capture(B0Fixtures::k_Items[B0Fixtures::k_ItemWrenchPickup1].json, 170);
+        s_Frame(s_Playing, nullptr);                                            // item.picked_up (B4 regression)
+        s_Capture(s_Contract[B0Fixtures::k_ContractFailedRestartA].json, 196);
+        s_Frame(s_Playing, nullptr);                                            // contract.ended (restart)
+        s_Frame(Scene("mission", 8, false, s_Paris, "Peacock"), s_SessionB);    // mission.stopped
+        s_Objective(197, nullptr, nullptr);                                     // presented after the fall drain
+        s_Frame(Scene("mission", 0, false, s_Paris, "Peacock"), nullptr);       // objective.completed, after the stop
+        s_Frame(Scene("mission", 7, false, s_Paris, "Peacock"), nullptr);
+        s_Frame(s_Playing, s_SessionB);                                         // mission.playing (attempt 2)
+        s_Objective(198, s_SessionA, nullptr);                                  // session A, attempt 2 not yet paired
+        s_Frame(s_Playing, nullptr);                                            // objective.completed
+        s_Capture(s_Contract[B0Fixtures::k_ContractStartB].json, 199);
+        s_Frame(s_Playing, nullptr);                                            // contract.started (B) pairs attempt 2
+        s_Objective(201, s_SessionA, nullptr);                                  // delayed, session A: contradiction
+        s_Frame(s_Playing, nullptr);                                            // objective.completed
+        s_Objective(203, s_SessionB, "5f0d2c1e-3b7a-4c9d-8e21-6a4b9c0d1e2f");   // session B: attached
+        s_Frame(s_Playing, nullptr);                                            // objective.completed
+        s_Frame(Scene("mission", 8, false, s_Paris, "Peacock"), s_SessionB);    // mission.stopped
+        s_Capture(s_Contract[B0Fixtures::k_ContractFailedExitB].json, 211);
+        s_Frame(Scene("mission", 2, false, s_Paris, "Peacock"), nullptr);       // contract.ended (exit)
+        s_Frame(Scene("", 8, true, s_Menu, ""), nullptr);
+
+        return s_Published;
+    }
 }
 
 int main(int p_Argc, char** p_Argv)
@@ -488,6 +598,10 @@ int main(int p_Argc, char** p_Argv)
         else if (s_Step == "b4")
         {
             s_Expected += ReplayB4(s_Adapter);
+        }
+        else if (s_Step == "b5")
+        {
+            s_Expected += ReplayB5(s_Adapter);
         }
         else if (s_Step == "stop")
         {

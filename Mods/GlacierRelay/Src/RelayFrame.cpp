@@ -78,6 +78,13 @@ RelayFrame::Result RelayFrame::Process(
             p_Adapter->Publish(*s_Normalized.contract_ended);
             ++s_Result.ungated_published;
         }
+        else if (s_Normalized.objective)
+        {
+            // Ungated (M2 B5): preserved with its payload wherever it drains relative to the edge;
+            // the gate above did not apply. Attribution is BEAM's.
+            p_Adapter->Publish(*s_Normalized.objective);
+            ++s_Result.ungated_published;
+        }
     }
 
     // Step 2: this frame's scene observation and, if the predicate moved, its edge.

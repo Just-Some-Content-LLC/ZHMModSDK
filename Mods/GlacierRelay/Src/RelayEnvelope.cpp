@@ -162,6 +162,32 @@ std::string RelaySerialization::ItemPayloadJson(const ItemEvent& p_Event)
     return s_Json;
 }
 
+std::string RelaySerialization::ObjectivePayloadJson(const ObjectiveEvent& p_Event)
+{
+    std::string s_Json = fmt::format(
+        "{{\"source\":{},\"engine_event\":{},\"objective_id\":{}", Json::Quote(RelayEvents::k_SourceEngineTelemetry),
+        Json::Quote(p_Event.engine_event), Json::Quote(p_Event.objective_id)
+    );
+
+    if (p_Event.objective_type)
+        s_Json += fmt::format(",\"objective_type\":{}", Json::Quote(*p_Event.objective_type));
+
+    if (p_Event.objective_category)
+        s_Json += fmt::format(",\"objective_category\":{}", Json::Quote(*p_Event.objective_category));
+
+    if (p_Event.exclude_from_scoring)
+        s_Json += fmt::format(",\"exclude_from_scoring\":{}", *p_Event.exclude_from_scoring ? "true" : "false");
+
+    if (p_Event.contract_session_id)
+        s_Json += fmt::format(",\"contract_session_id\":{}", Json::Quote(*p_Event.contract_session_id));
+
+    if (p_Event.engine_timestamp_s)
+        s_Json += fmt::format(",\"engine_timestamp_s\":{}", *p_Event.engine_timestamp_s);
+
+    s_Json += "}";
+    return s_Json;
+}
+
 std::string RelaySerialization::Envelope(const RelayEnvelope& p_Envelope)
 {
     return fmt::format(

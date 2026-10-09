@@ -36,12 +36,16 @@
 // M2 B4: item events are attempt-gated on the same evidence and follow the same rules; each
 // occurrence the engine emits is one publication (a removal and a throw drained in one frame are
 // two consecutive sequences, as captured).
+//
+// M2 B5: the objective occurrence is ungated. Drained after the fall it still publishes, after
+// mission.stopped in the sequence, with its full payload; it is never counted outside-attempt.
+// BEAM attributes it or keeps it unattributed with the reason.
 namespace RelayFrame
 {
     struct Result
     {
         size_t outcomes_published = 0; // attempt-gated events published (actor outcomes, disguise, items)
-        size_t ungated_published = 0;  // ungated events published (contract lifecycle)
+        size_t ungated_published = 0;  // ungated events published (contract lifecycle, objectives)
         size_t outside_attempt = 0;    // attempt-gated and normalized, but no attempt was open: not published
         size_t malformed = 0;
         bool playing_before = false;

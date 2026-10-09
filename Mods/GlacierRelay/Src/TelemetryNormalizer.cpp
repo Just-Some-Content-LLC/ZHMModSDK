@@ -24,6 +24,7 @@ namespace
         ItemPickedUp,
         ItemThrown,
         ItemRemovedFromInventory,
+        ObjectiveCompleted,
     };
 
     struct SourceEvent
@@ -52,6 +53,12 @@ namespace
         {"ItemPickedUp", Family::ItemPickedUp, TelemetryNormalizer::Gating::AttemptGated},
         {"ItemThrown", Family::ItemThrown, TelemetryNormalizer::Gating::AttemptGated},
         {"ItemRemovedFromInventory", Family::ItemRemovedFromInventory, TelemetryNormalizer::Gating::AttemptGated},
+        // The objective row (M2 B5, design section 42.4) is ungated: both captured occurrences sat
+        // inside the predicate window, but what the engine emits at a completion transition —
+        // possibly after the fall, when a gated row would keep only a name/index warning — has
+        // never been observed. Publishing whenever captured preserves the occurrence; BEAM
+        // attributes it, or keeps it unattributed, from its own evidence.
+        {"ObjectiveCompleted", Family::ObjectiveCompleted, TelemetryNormalizer::Gating::Ungated},
     };
 
     const SourceEvent* FindSource(std::string_view p_Name)
@@ -277,23 +284,73 @@ namespace
     // section 38.5) and so are not listed either.
     constexpr std::string_view k_ItemFields[] = {"RepositoryId", "InstanceId", "ItemName", "ItemType", "OnlineTraits"};
 
-    // The per-field diagnostic for a malformed item object (design section 38.7): each expected
+    // Objective row (M2 B5): the keys read from the objective object (design section 42.6).
+    constexpr std::string_view k_ObjectiveFields[] = {"Id", "Type", "Category", "ExcludeFromScoring"};
+
+    // The per-field diagnostic for a malformed object (design section 38.7): each expected
     // key's copied kind and, for an Unsupported value, the engine type name the intake copied.
     // Reveals the engine type only for values the intake could not read; a value read as
     // String/Number/Bool/Array/Object is reported by its Relay kind, which does not identify the
     // exact engine type. Bounded: a fixed list of keys, no string values (only byte counts), type
     // names escaped and capped by DescribeValue. No engine access, no new copy.
-    std::string DescribeItemFields(const TelemetryValue& p_Object)
+    template <size_t N>
+    std::string DescribeFields(const TelemetryValue& p_Object, const std::string_view (&p_Keys)[N])
     {
         std::string s_Out = "fields:";
 
-        for (size_t i = 0; i < std::size(k_ItemFields); ++i)
+        for (size_t i = 0; i < N; ++i)
         {
-            const auto* s_Value = p_Object.Find(k_ItemFields[i]);
-            s_Out += fmt::format("{} '{}' {}", i ? "," : "", k_ItemFields[i], s_Value ? DescribeValue(*s_Value) : "absent");
+            const auto* s_Value = p_Object.Find(p_Keys[i]);
+            s_Out += fmt::format("{} '{}' {}", i ? "," : "", p_Keys[i], s_Value ? DescribeValue(*s_Value) : "absent");
         }
 
         return s_Out;
+    }
+
+    // Optional string with the described kind on failure (items and objectives).
+    bool ReadOptionalStringDescribed(
+        const TelemetryValue& p_Object, std::string_view p_Key, std::optional<std::string>& p_Out, std::string& p_Detail
+    )
+    {
+        const auto* s_Field = p_Object.Find(p_Key);
+
+        if (!s_Field)
+        {
+            p_Out.reset();
+            return true;
+        }
+
+        if (s_Field->kind != TelemetryValue::Kind::String)
+        {
+            p_Detail = fmt::format("field '{}' is not a string ({})", p_Key, DescribeValue(*s_Field));
+            return false;
+        }
+
+        p_Out = s_Field->text;
+        return true;
+    }
+
+    // Optional bool: absent is fine; present must be a bool. false is a value, not absence.
+    bool ReadOptionalBoolDescribed(
+        const TelemetryValue& p_Object, std::string_view p_Key, std::optional<bool>& p_Out, std::string& p_Detail
+    )
+    {
+        const auto* s_Field = p_Object.Find(p_Key);
+
+        if (!s_Field)
+        {
+            p_Out.reset();
+            return true;
+        }
+
+        if (s_Field->kind != TelemetryValue::Kind::Bool)
+        {
+            p_Detail = fmt::format("field '{}' is not a bool ({})", p_Key, DescribeValue(*s_Field));
+            return false;
+        }
+
+        p_Out = s_Field->boolean;
+        return true;
     }
 }
 
@@ -399,6 +456,7 @@ TelemetryNormalizer::Result TelemetryNormalizer::Normalize(const TelemetryObserv
         case Family::ItemRemovedFromInventory:
             s_Result = NormalizeItem(p_Observation, ItemEvent::Kind::RemovedFromInventory);
             break;
+        case Family::ObjectiveCompleted: s_Result = NormalizeObjective(p_Observation); break;
     }
 
     s_Result.gating = s_Source->gating;
@@ -537,7 +595,7 @@ TelemetryNormalizer::Result TelemetryNormalizer::NormalizeItem(
         return Malformed(p_Observation, fmt::format("Value is not an object ({})", DescribeValue(s_Value)));
 
     auto s_Malformed = [&](const std::string& p_Detail) {
-        return Malformed(p_Observation, fmt::format("{}; {}", p_Detail, DescribeItemFields(s_Value)));
+        return Malformed(p_Observation, fmt::format("{}; {}", p_Detail, DescribeFields(s_Value, k_ItemFields)));
     };
 
     // Required: the definition id, the event's subject. Non-empty; its format is not checked (the
@@ -562,30 +620,11 @@ TelemetryNormalizer::Result TelemetryNormalizer::NormalizeItem(
     // Optional strings: absent is fine; present must be a string. InstanceId is the one field
     // where an empty string is normal (24/24 sampled): it is carried only when non-empty, so the
     // Relay event never shows an instance the engine did not name.
-    auto s_OptionalString = [&](std::string_view p_Key, std::optional<std::string>& p_Out, std::string& p_Detail) {
-        const auto* s_Field = s_Value.Find(p_Key);
-
-        if (!s_Field)
-        {
-            p_Out.reset();
-            return true;
-        }
-
-        if (s_Field->kind != TelemetryValue::Kind::String)
-        {
-            p_Detail = fmt::format("field '{}' is not a string ({})", p_Key, DescribeValue(*s_Field));
-            return false;
-        }
-
-        p_Out = s_Field->text;
-        return true;
-    };
-
     std::string s_Detail;
 
-    if (!s_OptionalString("InstanceId", s_Event.item_instance_id, s_Detail)
-        || !s_OptionalString("ItemName", s_Event.item_name, s_Detail)
-        || !s_OptionalString("ItemType", s_Event.item_type, s_Detail)
+    if (!ReadOptionalStringDescribed(s_Value, "InstanceId", s_Event.item_instance_id, s_Detail)
+        || !ReadOptionalStringDescribed(s_Value, "ItemName", s_Event.item_name, s_Detail)
+        || !ReadOptionalStringDescribed(s_Value, "ItemType", s_Event.item_type, s_Detail)
         || !ReadOptionalStringArray(s_Value, "OnlineTraits", s_Event.online_traits, s_Detail))
     {
         return s_Malformed(s_Detail);
@@ -608,6 +647,59 @@ TelemetryNormalizer::Result TelemetryNormalizer::NormalizeItem(
     ++m_Counters.normalized;
     s_Result.outcome = Outcome::Normalized;
     s_Result.item = std::move(s_Event);
+    return s_Result;
+}
+
+TelemetryNormalizer::Result TelemetryNormalizer::NormalizeObjective(const TelemetryObservation& p_Observation)
+{
+    const TelemetryValue& s_Value = p_Observation.value;
+
+    // One recorded payload (B0, design section 42.1): {Id, Type, Category, ExcludeFromScoring}. Only
+    // the subject is required; the other three are hypotheses from one sample and must produce a
+    // malformed line with the per-field detail if the engine's types differ, not a silent drop.
+    if (s_Value.kind != TelemetryValue::Kind::Object)
+        return Malformed(p_Observation, fmt::format("Value is not an object ({})", DescribeValue(s_Value)));
+
+    auto s_Malformed = [&](const std::string& p_Detail) {
+        return Malformed(p_Observation, fmt::format("{}; {}", p_Detail, DescribeFields(s_Value, k_ObjectiveFields)));
+    };
+
+    const auto* s_Id = s_Value.Find("Id");
+
+    if (!s_Id)
+        return s_Malformed("missing field 'Id'");
+
+    if (s_Id->kind != TelemetryValue::Kind::String)
+        return s_Malformed(fmt::format("field 'Id' is not a string ({})", DescribeValue(*s_Id)));
+
+    if (s_Id->text.empty())
+        return s_Malformed("field 'Id' is empty");
+
+    ObjectiveEvent s_Event;
+    s_Event.engine_event = p_Observation.name;
+    s_Event.objective_id = s_Id->text;
+
+    std::string s_Detail;
+
+    if (!ReadOptionalStringDescribed(s_Value, "Type", s_Event.objective_type, s_Detail)
+        || !ReadOptionalStringDescribed(s_Value, "Category", s_Event.objective_category, s_Detail)
+        || !ReadOptionalBoolDescribed(s_Value, "ExcludeFromScoring", s_Event.exclude_from_scoring, s_Detail))
+    {
+        return s_Malformed(s_Detail);
+    }
+
+    // Provenance from the stream envelope: the session is attribution evidence for BEAM, the
+    // timestamp an observation; both optional. XboxGameMode/XboxDifficulty are not read.
+    if (!p_Observation.contract_session_id.empty())
+        s_Event.contract_session_id = p_Observation.contract_session_id;
+
+    if (p_Observation.has_timestamp)
+        s_Event.engine_timestamp_s = p_Observation.timestamp_s;
+
+    Result s_Result;
+    ++m_Counters.normalized;
+    s_Result.outcome = Outcome::Normalized;
+    s_Result.objective = std::move(s_Event);
     return s_Result;
 }
 

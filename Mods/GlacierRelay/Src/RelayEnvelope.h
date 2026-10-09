@@ -37,7 +37,11 @@ namespace RelaySerialization
     // the same shape, plus "kind" on disguise.equipped only.
     std::string DisguisePayloadJson(const DisguiseEvent& p_Event);
     // Schema version 1 of item.picked_up / item.thrown / item.removed_from_inventory: one shape;
-    // optional fields are absent, never empty or null.
+    // an absent optional field is omitted (never null); an empty InstanceId is omitted, while
+    // empty display strings and an empty traits array are written as sent.
     std::string ItemPayloadJson(const ItemEvent& p_Event);
+    // Schema version 1 of objective.completed; optional fields absent when not observed,
+    // exclude_from_scoring written when present (false included).
+    std::string ObjectivePayloadJson(const ObjectiveEvent& p_Event);
     std::string Envelope(const RelayEnvelope& p_Envelope);
 }

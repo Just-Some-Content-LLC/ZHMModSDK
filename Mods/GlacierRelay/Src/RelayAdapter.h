@@ -33,6 +33,7 @@ public:
     void Publish(const ContractEndedEvent& p_Event);
     void Publish(const DisguiseEvent& p_Event);
     void Publish(const ItemEvent& p_Event);
+    void Publish(const ObjectiveEvent& p_Event);
 
     const std::string& InstanceId() const { return m_InstanceId; }
     uint64_t PublishedCount() const { return m_Sequence; }
