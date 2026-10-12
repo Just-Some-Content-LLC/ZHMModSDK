@@ -43,5 +43,10 @@ namespace RelaySerialization
     // Schema version 1 of objective.completed; optional fields absent when not observed,
     // exclude_from_scoring written when present (false included).
     std::string ObjectivePayloadJson(const ObjectiveEvent& p_Event);
+    // Schema version 1 of player.trespassing (room_id written as the copied number when present)
+    // and player.illegal_weapon (weapon written as a nested object when present, with the item
+    // rules of ItemPayloadJson plus perceived_as_weapon when present, false included).
+    std::string PlayerTrespassingPayloadJson(const PlayerTrespassingEvent& p_Event);
+    std::string PlayerIllegalWeaponPayloadJson(const PlayerIllegalWeaponEvent& p_Event);
     std::string Envelope(const RelayEnvelope& p_Envelope);
 }

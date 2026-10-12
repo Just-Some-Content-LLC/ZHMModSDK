@@ -174,7 +174,7 @@ void RunItemTelemetryTests()
     CHECK(!TelemetryNormalizer::IsSupportedSourceName("ItemDestroyed"));        // research candidate (38.9)
     CHECK(!TelemetryNormalizer::IsSupportedSourceName("ItemStashed"));          // NPC-side, out of scope
     CHECK(!TelemetryNormalizer::IsSupportedSourceName("Guard_FoundItem"));      // NPC-side, out of scope
-    CHECK(!TelemetryNormalizer::IsSupportedSourceName("HoldingIllegalWeapon")); // player state: B6
+    CHECK(TelemetryNormalizer::IsSupportedSourceName("HoldingIllegalWeapon"));  // player state: a row since B6
     CHECK(!TelemetryNormalizer::IsSupportedSourceName("itempickedup"));         // names are exact
     CHECK(!TelemetryNormalizer::IsSupportedSourceName("ItemPickedUp "));
 

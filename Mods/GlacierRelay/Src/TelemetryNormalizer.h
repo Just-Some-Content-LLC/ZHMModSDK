@@ -17,12 +17,14 @@
 // outcomes. It never produces a generic pass-through of a source payload.
 //
 // Each table row also states how the plugin gates publication (M2 design, section 27.5):
-// attempt-gated events (actor outcomes) are published only while the mission predicate is true;
-// ungated events (contract lifecycle; the objective occurrence since M2 B5, whose placement at a
-// completion transition is unobserved and must be preserved with its payload wherever it lands)
-// are published whenever captured and valid, because Glacier emits them on both sides of the
-// predicate's edges. The gate is a per-row fact, not a framework;
-// no grace window, no native attachment of an event to an attempt.
+// attempt-gated events (actor outcomes; disguise, items and the player-state occurrences since M2
+// B3, B4 and B6) are published only while the mission predicate is true; ungated events (contract
+// lifecycle; the objective occurrence since M2 B5, whose placement at a completion transition is
+// unobserved and must be preserved with its payload wherever it lands) are published whenever
+// captured and valid, because Glacier emits them on both sides of the predicate's edges. The gate
+// is a per-row fact supported by the observed runs, not a Glacier guarantee: the outside-attempt
+// counter is the instrument that would reveal a surprise. No grace window, no native attachment
+// of an event to an attempt.
 class TelemetryNormalizer
 {
 public:
@@ -50,6 +52,8 @@ public:
         std::optional<DisguiseEvent> disguise;                // Normalized, attempt-gated (M2 B3)
         std::optional<ItemEvent> item;                        // Normalized, attempt-gated (M2 B4)
         std::optional<ObjectiveEvent> objective;              // Normalized, ungated (M2 B5)
+        std::optional<PlayerTrespassingEvent> trespassing;    // Normalized, attempt-gated (M2 B6)
+        std::optional<PlayerIllegalWeaponEvent> illegal_weapon; // Normalized, attempt-gated (M2 B6)
         std::string detail;                                // Malformed: the field and what was wrong
     };
 
@@ -89,6 +93,8 @@ private:
     Result NormalizeDisguise(const TelemetryObservation& p_Observation, DisguiseEvent::Kind p_Kind);
     Result NormalizeItem(const TelemetryObservation& p_Observation, ItemEvent::Kind p_Kind);
     Result NormalizeObjective(const TelemetryObservation& p_Observation);
+    Result NormalizeTrespassing(const TelemetryObservation& p_Observation);
+    Result NormalizeIllegalWeapon(const TelemetryObservation& p_Observation);
     Result Malformed(const TelemetryObservation& p_Observation, const std::string& p_Detail);
     void Count(std::map<std::string, uint64_t>& p_Map, const std::string& p_Name);
 

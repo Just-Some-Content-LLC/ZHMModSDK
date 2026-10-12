@@ -188,6 +188,75 @@ std::string RelaySerialization::ObjectivePayloadJson(const ObjectiveEvent& p_Eve
     return s_Json;
 }
 
+std::string RelaySerialization::PlayerTrespassingPayloadJson(const PlayerTrespassingEvent& p_Event)
+{
+    std::string s_Json = fmt::format(
+        "{{\"source\":{},\"engine_event\":{},\"trespassing\":{}", Json::Quote(RelayEvents::k_SourceEngineTelemetry),
+        Json::Quote(p_Event.engine_event), p_Event.trespassing ? "true" : "false"
+    );
+
+    // The copied number as fmt renders it (shortest round-trip text: 6.0 -> "6"); never NaN or an
+    // infinity, which the normalizer rejects.
+    if (p_Event.room_id)
+        s_Json += fmt::format(",\"room_id\":{}", *p_Event.room_id);
+
+    if (p_Event.contract_session_id)
+        s_Json += fmt::format(",\"contract_session_id\":{}", Json::Quote(*p_Event.contract_session_id));
+
+    if (p_Event.engine_timestamp_s)
+        s_Json += fmt::format(",\"engine_timestamp_s\":{}", *p_Event.engine_timestamp_s);
+
+    s_Json += "}";
+    return s_Json;
+}
+
+std::string RelaySerialization::PlayerIllegalWeaponPayloadJson(const PlayerIllegalWeaponEvent& p_Event)
+{
+    std::string s_Json = fmt::format(
+        "{{\"source\":{},\"engine_event\":{},\"holding\":{}", Json::Quote(RelayEvents::k_SourceEngineTelemetry),
+        Json::Quote(p_Event.engine_event), p_Event.holding ? "true" : "false"
+    );
+
+    if (p_Event.weapon)
+    {
+        const auto& s_Weapon = *p_Event.weapon;
+        s_Json += fmt::format(",\"weapon\":{{\"item_repository_id\":{}", Json::Quote(s_Weapon.item_repository_id));
+
+        if (s_Weapon.item_instance_id)
+            s_Json += fmt::format(",\"item_instance_id\":{}", Json::Quote(*s_Weapon.item_instance_id));
+
+        if (s_Weapon.item_name)
+            s_Json += fmt::format(",\"item_name\":{}", Json::Quote(*s_Weapon.item_name));
+
+        if (s_Weapon.item_type)
+            s_Json += fmt::format(",\"item_type\":{}", Json::Quote(*s_Weapon.item_type));
+
+        if (s_Weapon.online_traits)
+        {
+            s_Json += ",\"online_traits\":[";
+
+            for (size_t i = 0; i < s_Weapon.online_traits->size(); ++i)
+                s_Json += (i ? "," : "") + Json::Quote((*s_Weapon.online_traits)[i]);
+
+            s_Json += "]";
+        }
+
+        if (s_Weapon.perceived_as_weapon)
+            s_Json += fmt::format(",\"perceived_as_weapon\":{}", *s_Weapon.perceived_as_weapon ? "true" : "false");
+
+        s_Json += "}";
+    }
+
+    if (p_Event.contract_session_id)
+        s_Json += fmt::format(",\"contract_session_id\":{}", Json::Quote(*p_Event.contract_session_id));
+
+    if (p_Event.engine_timestamp_s)
+        s_Json += fmt::format(",\"engine_timestamp_s\":{}", *p_Event.engine_timestamp_s);
+
+    s_Json += "}";
+    return s_Json;
+}
+
 std::string RelaySerialization::Envelope(const RelayEnvelope& p_Envelope)
 {
     return fmt::format(

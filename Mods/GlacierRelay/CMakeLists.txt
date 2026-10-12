@@ -69,6 +69,7 @@ add_executable(GlacierRelayTests
         Tests/DisguiseTelemetryTests.cpp
         Tests/ItemTelemetryTests.cpp
         Tests/ObjectiveTelemetryTests.cpp
+        Tests/PlayerStateTelemetryTests.cpp
         Tests/MissionObserverTests.cpp
         Tests/RelayAdapterTests.cpp
         Tests/RelayFrameTests.cpp
@@ -85,6 +86,7 @@ add_executable(GlacierRelayTests
         Tests/Fixtures/B0ItemBytes.h
         Tests/Fixtures/B0Items.h
         Tests/Fixtures/B0Objectives.h
+        Tests/Fixtures/B0PlayerState.h
 )
 
 target_include_directories(GlacierRelayTests PRIVATE

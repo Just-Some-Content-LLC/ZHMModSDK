@@ -11,6 +11,7 @@ void RunDisguiseTelemetryTests();
 void RunRepositoryIdTests();
 void RunItemTelemetryTests();
 void RunObjectiveTelemetryTests();
+void RunPlayerStateTelemetryTests();
 
 int main()
 {
@@ -24,6 +25,7 @@ int main()
     RunRepositoryIdTests();
     RunItemTelemetryTests();
     RunObjectiveTelemetryTests();
+    RunPlayerStateTelemetryTests();
     RunTcpRelaySinkTests();
 
     if (g_Failures == 0)

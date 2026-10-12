@@ -138,6 +138,22 @@ void RelayAdapter::Publish(const ObjectiveEvent& p_Event)
     );
 }
 
+void RelayAdapter::Publish(const PlayerTrespassingEvent& p_Event)
+{
+    PublishEnvelope(
+        RelayEvents::k_PlayerTrespassing, RelayEvents::k_PlayerTrespassingSchemaVersion,
+        RelaySerialization::PlayerTrespassingPayloadJson(p_Event)
+    );
+}
+
+void RelayAdapter::Publish(const PlayerIllegalWeaponEvent& p_Event)
+{
+    PublishEnvelope(
+        RelayEvents::k_PlayerIllegalWeapon, RelayEvents::k_PlayerIllegalWeaponSchemaVersion,
+        RelaySerialization::PlayerIllegalWeaponPayloadJson(p_Event)
+    );
+}
+
 void RelayAdapter::Publish(const MissionEvent& p_Event)
 {
     std::visit([this](const auto& p_Concrete) { Publish(p_Concrete); }, p_Event);

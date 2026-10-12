@@ -118,7 +118,7 @@ void RunDisguiseTelemetryTests()
     CHECK(TelemetryNormalizer::IsSupportedSourceName("BrokenDisguiseCleared"));
     CHECK(!TelemetryNormalizer::IsSupportedSourceName("Spotted"));     // detection: deferred
     CHECK(!TelemetryNormalizer::IsSupportedSourceName("Witnesses"));   // detection: deferred
-    CHECK(!TelemetryNormalizer::IsSupportedSourceName("Trespassing")); // player state: B6
+    CHECK(TelemetryNormalizer::IsSupportedSourceName("Trespassing"));  // player state: a row since B6
     CHECK(!TelemetryNormalizer::IsSupportedSourceName("disguise"));    // names are exact
 
     // The 8 recorded payloads, in emission order: kind, provenance, id, session, timestamp.

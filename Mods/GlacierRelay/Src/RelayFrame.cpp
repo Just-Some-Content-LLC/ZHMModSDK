@@ -68,6 +68,18 @@ RelayFrame::Result RelayFrame::Process(
             p_Adapter->Publish(*s_Normalized.item);
             ++s_Result.outcomes_published;
         }
+        else if (s_Normalized.trespassing)
+        {
+            // Attempt-gated (M2 B6): the gate above already applied.
+            p_Adapter->Publish(*s_Normalized.trespassing);
+            ++s_Result.outcomes_published;
+        }
+        else if (s_Normalized.illegal_weapon)
+        {
+            // Attempt-gated (M2 B6): the gate above already applied.
+            p_Adapter->Publish(*s_Normalized.illegal_weapon);
+            ++s_Result.outcomes_published;
+        }
         else if (s_Normalized.contract_started)
         {
             p_Adapter->Publish(*s_Normalized.contract_started);

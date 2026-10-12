@@ -18,6 +18,10 @@
 // "b5" replays the B0 objective occurrence beside the accepted vocabulary and the section 42.7
 // attribution cases (an objective drained after the fall, one before the restarted attempt's
 // ContractStart, a delayed one carrying the previous session, one with the matching session);
+// "b6" replays B0 session 1's six player-state occurrences (Trespassing, HoldingIllegalWeapon) in
+// their recorded order beside the accepted vocabulary, through a fresh entry, a restart and an
+// exit to menu, with one occurrence presented after the fall (attempt-gated: not published) and
+// a second attempt that carries one illegal-weapon statement and no trespass statement;
 // "sleep:<ms>" waits. Exit code is 0 when the adapter's sequence count matches what was asked.
 
 #include <cstdio>
@@ -33,6 +37,7 @@
 #include "Fixtures/B0ItemBytes.h"
 #include "Fixtures/B0Items.h"
 #include "Fixtures/B0Objectives.h"
+#include "Fixtures/B0PlayerState.h"
 #include "MissionObserver.h"
 #include "RelayAdapter.h"
 #include "RelayFrame.h"
@@ -527,6 +532,121 @@ namespace
 
         return s_Published;
     }
+
+    // M2 B6. B0 session 1's player-state occurrences as the engine emitted them (design section
+    // 46.1), through the production frame sequencing beside the accepted rows:
+    //   attempt 1 (session A): contract.started, mission.playing, StartingSuit, Trespassing true
+    //     (room 6), a wrench pickup (B4), the first Disguise with the Trespassing false 25 ms later
+    //     in one drain, Pacify Parker (B1), HoldingIllegalWeapon true (with the pistol object),
+    //     false, then true and false in one drain, Kill Novikov with its ObjectiveCompleted (B5),
+    //     ContractFailed (restart), the fall; then a Trespassing presented AFTER the fall frame's
+    //     drain -> attempt-gated: counted outside attempt, warned, not published (the chosen cost);
+    //   attempt 2 (session B): the rise, ContractStart(B), StartingSuit, one HoldingIllegalWeapon
+    //     true re-stamped with session B and no Trespassing at all (BEAM: trespassing not observed,
+    //     nothing inherited from attempt 1), the fall, ContractFailed (exit). 22 envelopes.
+    int ReplayB6(RelayAdapter& p_Adapter)
+    {
+        const char* s_Paris = "assembly:/_PRO/Scenes/Missions/Paris/_Scene_FashionShowHit_01.entity";
+        const char* s_Menu = "assembly:/_PRO/Scenes/Frontend/MainMenu.entity";
+        const char* s_SessionA = "2516109628137904204-c00b2d17-08b1-4949-9f9d-5f68b691f40f";
+        const char* s_SessionB = "2516109618691980006-9666b5ad-6a4f-44bb-b5fb-ff86bb3a8d76";
+
+        TelemetryQueue s_Queue(256);
+        TelemetryNormalizer s_Normalizer;
+        MissionObserver s_Observer;
+        int s_Published = 0;
+
+        auto s_Frame = [&](const SceneState& p_Scene, const char* p_SessionId) {
+            std::optional<std::string> s_SessionId;
+            if (p_SessionId)
+                s_SessionId = p_SessionId;
+
+            const auto s_Result = RelayFrame::Process(
+                s_Queue, s_Normalizer, s_Observer, &p_Adapter, p_Scene, s_SessionId,
+                [](const std::string& p_Line) { std::printf("b6: %s\n", p_Line.c_str()); }
+            );
+
+            const int s_Count = static_cast<int>(s_Result.outcomes_published + s_Result.ungated_published + (s_Result.edge_published ? 1 : 0));
+            s_Published += s_Count;
+
+            if (s_Count)
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        };
+
+        auto s_Capture = [&](const char* p_Json, uint32_t p_Index) {
+            s_Queue.Push(TestJson::ObservationFromRecordedEvent(p_Json, p_Index));
+        };
+
+        const auto& s_Contract = B0Fixtures::k_ContractLifecycle;
+        const auto& s_Disguise = B0Fixtures::k_Disguise;
+        const auto& s_Actor = B0Fixtures::k_ActorOutcomes;
+        const auto& s_Player = B0Fixtures::k_PlayerState;
+        const auto s_Playing = Scene("mission", 8, true, s_Paris, "Peacock");
+
+        auto s_Disguised = [&](size_t p_Index) {
+            auto s_Obs = TestJson::ObservationFromRecordedEvent(s_Disguise[p_Index].json, static_cast<uint32_t>(s_Disguise[p_Index].event_index));
+            s_Obs.value = TelemetryValue{};
+            s_Obs.value.kind = TelemetryValue::Kind::String;
+            s_Obs.value.text = RepositoryId::FromLittleEndianBytes(B0Fixtures::k_DisguiseImages[p_Index]->le_bytes).ToDashedLowercase();
+            s_Queue.Push(s_Obs);
+        };
+
+        // A recorded player-state occurrence, optionally re-stamped with another index and session
+        // (synthetic placement; the Value and timestamp stay the corpus's).
+        auto s_PlayerState = [&](size_t p_Index, uint32_t p_EventIndex, const char* p_Session) {
+            auto s_Obs = TestJson::ObservationFromRecordedEvent(
+                s_Player[p_Index].json, p_EventIndex ? p_EventIndex : static_cast<uint32_t>(s_Player[p_Index].event_index));
+            if (p_Session)
+                s_Obs.contract_session_id = p_Session;
+            s_Queue.Push(s_Obs);
+        };
+
+        s_Frame(Scene("", 8, true, s_Menu, ""), nullptr);
+        s_Frame(Scene("mission", 5, false, s_Paris, "Peacock"), nullptr);
+        s_Capture(s_Contract[B0Fixtures::k_ContractStartA].json, 2);
+        s_Frame(Scene("mission", 7, false, s_Paris, "Peacock"), nullptr);      // contract.started (A)
+        s_Frame(s_Playing, s_SessionA);                                         // mission.playing
+        s_Disguised(B0Fixtures::k_StartingSuitA);
+        s_Frame(s_Playing, nullptr);                                            // disguise.equipped (initial)
+        s_PlayerState(B0Fixtures::k_TrespassingEntered, 0, nullptr);
+        s_Frame(s_Playing, nullptr);                                            // player.trespassing true
+        s_Capture(B0Fixtures::k_Items[B0Fixtures::k_ItemWrenchPickup1].json, 16);
+        s_Frame(s_Playing, nullptr);                                            // item.picked_up (B4 regression)
+        s_Disguised(B0Fixtures::k_DisguiseChange1);
+        s_PlayerState(B0Fixtures::k_TrespassingLeft, 0, nullptr);               // 25 ms later
+        s_Frame(s_Playing, nullptr);                                            // disguise.equipped (change), player.trespassing false
+        s_Capture(s_Actor[0].json, 35);                                         // Pacify Parker (B1 regression)
+        s_Frame(s_Playing, nullptr);                                            // actor.pacified
+        s_PlayerState(B0Fixtures::k_IllegalWeaponDrawn1, 0, nullptr);
+        s_Frame(s_Playing, nullptr);                                            // player.illegal_weapon true (weapon)
+        s_PlayerState(B0Fixtures::k_IllegalWeaponHolstered1, 0, nullptr);
+        s_Frame(s_Playing, nullptr);                                            // player.illegal_weapon false
+        s_PlayerState(B0Fixtures::k_IllegalWeaponDrawn2, 0, nullptr);
+        s_PlayerState(B0Fixtures::k_IllegalWeaponHolstered2, 0, nullptr);
+        s_Frame(s_Playing, nullptr);                                            // player.illegal_weapon true, false (one drain)
+        s_Capture(s_Actor[13].json, 162);                                       // Kill Novikov (target)
+        s_Capture(B0Fixtures::k_Objectives[0].json, 163);                       // ObjectiveCompleted, 13 ms later (B5 regression)
+        s_Frame(s_Playing, nullptr);                                            // actor.died, objective.completed
+        s_Capture(s_Contract[B0Fixtures::k_ContractFailedRestartA].json, 196);
+        s_Frame(s_Playing, nullptr);                                            // contract.ended (restart)
+        s_Frame(Scene("mission", 8, false, s_Paris, "Peacock"), s_SessionB);    // mission.stopped
+        s_PlayerState(B0Fixtures::k_TrespassingEntered, 197, nullptr);          // presented after the fall drain
+        s_Frame(Scene("mission", 0, false, s_Paris, "Peacock"), nullptr);       // outside attempt: warned, not published
+        s_Frame(Scene("mission", 7, false, s_Paris, "Peacock"), nullptr);
+        s_Frame(s_Playing, s_SessionB);                                         // mission.playing (attempt 2)
+        s_Capture(s_Contract[B0Fixtures::k_ContractStartB].json, 199);
+        s_Frame(s_Playing, nullptr);                                            // contract.started (B)
+        s_Disguised(B0Fixtures::k_StartingSuitB);
+        s_Frame(s_Playing, nullptr);                                            // disguise.equipped (initial)
+        s_PlayerState(B0Fixtures::k_IllegalWeaponDrawn1, 205, s_SessionB);      // session B: one true, no false, no trespass
+        s_Frame(s_Playing, nullptr);                                            // player.illegal_weapon true (weapon)
+        s_Frame(Scene("mission", 8, false, s_Paris, "Peacock"), s_SessionB);    // mission.stopped
+        s_Capture(s_Contract[B0Fixtures::k_ContractFailedExitB].json, 211);
+        s_Frame(Scene("mission", 2, false, s_Paris, "Peacock"), nullptr);       // contract.ended (exit)
+        s_Frame(Scene("", 8, true, s_Menu, ""), nullptr);
+
+        return s_Published;
+    }
 }
 
 int main(int p_Argc, char** p_Argv)
@@ -602,6 +722,10 @@ int main(int p_Argc, char** p_Argv)
         else if (s_Step == "b5")
         {
             s_Expected += ReplayB5(s_Adapter);
+        }
+        else if (s_Step == "b6")
+        {
+            s_Expected += ReplayB6(s_Adapter);
         }
         else if (s_Step == "stop")
         {

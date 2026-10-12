@@ -83,6 +83,19 @@ namespace RelayEvents
     constexpr const char* k_ObjectiveCompleted = "objective.completed";
     constexpr int k_ObjectiveCompletedSchemaVersion = 1;
 
+    // Player state, normalized from Glacier's engine-authored telemetry (M2 B6, design section 46).
+    // Each is one engine statement about the player at that moment, never a continuously
+    // established state: player.trespassing — the engine asserted its trespassing classification
+    // ("Trespassing": true or false, with the engine's RoomId number verbatim when present);
+    // player.illegal_weapon — the engine asserted its illegal-weapon classification
+    // ("HoldingIllegalWeapon": true or false, with the item object it attached when it attached
+    // one). Neither says what the player is doing now, what is carried, what the inventory holds,
+    // whether the player is safe or detected, or what a room id identifies. Attempt-gated.
+    constexpr const char* k_PlayerTrespassing = "player.trespassing";
+    constexpr int k_PlayerTrespassingSchemaVersion = 1;
+    constexpr const char* k_PlayerIllegalWeapon = "player.illegal_weapon";
+    constexpr int k_PlayerIllegalWeaponSchemaVersion = 1;
+
     // Provenance value carried by events normalized from the telemetry stream.
     constexpr const char* k_SourceEngineTelemetry = "engine_telemetry";
 }
@@ -264,4 +277,53 @@ struct ObjectiveEvent
     std::optional<double> engine_timestamp_s;
 
     bool operator==(const ObjectiveEvent&) const = default;
+};
+
+// One trespassing occurrence, schema version 1 (M2 B6, design section 46.3). trespassing is the
+// engine's boolean verbatim: the subject. room_id is the engine's RoomId number verbatim when it
+// sent one (a finite number; integer-valued 6 and 3 in B0): not interpreted as a room name, an
+// entity id or a location, and never required. The occurrence asserts nothing about the state at
+// any other moment; the attempt it belongs to begins with no assertion at all.
+struct PlayerTrespassingEvent
+{
+    std::string engine_event; // provenance: the Glacier event name ("Trespassing")
+    bool trespassing = false;
+    std::optional<double> room_id;
+    std::optional<std::string> contract_session_id;
+    std::optional<double> engine_timestamp_s;
+
+    bool operator==(const PlayerTrespassingEvent&) const = default;
+};
+
+// The item object the engine attached to an illegal-weapon occurrence (its "WeaponEquipped"),
+// read with the B4 item rules: the definition id is required and non-empty; item_instance_id is
+// carried only when non-empty (the B0 samples named the loadout pistol's instance); the display
+// strings and traits are carried verbatim as evidence; perceived_as_weapon is the engine's own
+// boolean ("IsPerceivedAsWeapon") when present. It is what the engine attached, not what is held.
+struct IllegalWeaponObservation
+{
+    std::string item_repository_id;
+    std::optional<std::string> item_instance_id;
+    std::optional<std::string> item_name;
+    std::optional<std::string> item_type;
+    std::optional<std::vector<std::string>> online_traits;
+    std::optional<bool> perceived_as_weapon;
+
+    bool operator==(const IllegalWeaponObservation&) const = default;
+};
+
+// One illegal-weapon occurrence, schema version 1 (M2 B6, design section 46.3). holding is the
+// engine's "IsHoldingIllegalWeapon" boolean verbatim: a specific engine classification at that
+// moment, not an inventory fact. weapon is present exactly when the engine attached a structurally
+// valid item object, whatever the boolean says: a true without one is valid (the omission is
+// evidence), and a false with one is carried as observed rather than rejected or reinterpreted.
+struct PlayerIllegalWeaponEvent
+{
+    std::string engine_event; // provenance: the Glacier event name ("HoldingIllegalWeapon")
+    bool holding = false;
+    std::optional<IllegalWeaponObservation> weapon;
+    std::optional<std::string> contract_session_id;
+    std::optional<double> engine_timestamp_s;
+
+    bool operator==(const PlayerIllegalWeaponEvent&) const = default;
 };

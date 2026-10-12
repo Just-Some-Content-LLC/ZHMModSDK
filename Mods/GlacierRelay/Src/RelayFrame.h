@@ -40,11 +40,15 @@
 // M2 B5: the objective occurrence is ungated. Drained after the fall it still publishes, after
 // mission.stopped in the sequence, with its full payload; it is never counted outside-attempt.
 // BEAM attributes it or keeps it unattributed with the reason.
+//
+// M2 B6: the two player-state occurrences (Trespassing, HoldingIllegalWeapon) are attempt-gated on
+// the same evidence class as items and follow the same rules. A repeated identical engine statement
+// is a repeated occurrence; nothing is deduplicated or folded here.
 namespace RelayFrame
 {
     struct Result
     {
-        size_t outcomes_published = 0; // attempt-gated events published (actor outcomes, disguise, items)
+        size_t outcomes_published = 0; // attempt-gated events published (actor outcomes, disguise, items, player state)
         size_t ungated_published = 0;  // ungated events published (contract lifecycle, objectives)
         size_t outside_attempt = 0;    // attempt-gated and normalized, but no attempt was open: not published
         size_t malformed = 0;

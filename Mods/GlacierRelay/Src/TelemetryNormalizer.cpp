@@ -25,6 +25,8 @@ namespace
         ItemThrown,
         ItemRemovedFromInventory,
         ObjectiveCompleted,
+        PlayerTrespassing,
+        PlayerIllegalWeapon,
     };
 
     struct SourceEvent
@@ -59,6 +61,13 @@ namespace
         // never been observed. Publishing whenever captured preserves the occurrence; BEAM
         // attributes it, or keeps it unattributed, from its own evidence.
         {"ObjectiveCompleted", Family::ObjectiveCompleted, TelemetryNormalizer::Gating::Ungated},
+        // Player-state rows (M2 B6, design section 46.4) are attempt-gated: every name-only
+        // observation across six production runs (23 Trespassing, 48 HoldingIllegalWeapon) and all
+        // six B0 payloads fell inside the predicate window. That is observed-run evidence, not a
+        // Glacier guarantee; an occurrence after the fall is counted outside-attempt and warned.
+        // Hero_Health and Hero_Dead have no row: payloads never captured (section 46.8).
+        {"Trespassing", Family::PlayerTrespassing, TelemetryNormalizer::Gating::AttemptGated},
+        {"HoldingIllegalWeapon", Family::PlayerIllegalWeapon, TelemetryNormalizer::Gating::AttemptGated},
     };
 
     const SourceEvent* FindSource(std::string_view p_Name)
@@ -287,6 +296,14 @@ namespace
     // Objective row (M2 B5): the keys read from the objective object (design section 42.6).
     constexpr std::string_view k_ObjectiveFields[] = {"Id", "Type", "Category", "ExcludeFromScoring"};
 
+    // Player-state rows (M2 B6, design section 46.5): the keys read from each Value, and from the
+    // nested WeaponEquipped object when it is one (the B4 item keys plus IsPerceivedAsWeapon;
+    // Category and ActionRewardType are not read there either).
+    constexpr std::string_view k_TrespassingFields[] = {"IsTrespassing", "RoomId"};
+    constexpr std::string_view k_IllegalWeaponFields[] = {"IsHoldingIllegalWeapon", "WeaponEquipped"};
+    constexpr std::string_view k_WeaponFields[] = {
+        "RepositoryId", "InstanceId", "ItemName", "ItemType", "OnlineTraits", "IsPerceivedAsWeapon"};
+
     // The per-field diagnostic for a malformed object (design section 38.7): each expected
     // key's copied kind and, for an Unsupported value, the engine type name the intake copied.
     // Reveals the engine type only for values the intake could not read; a value read as
@@ -294,9 +311,9 @@ namespace
     // exact engine type. Bounded: a fixed list of keys, no string values (only byte counts), type
     // names escaped and capped by DescribeValue. No engine access, no new copy.
     template <size_t N>
-    std::string DescribeFields(const TelemetryValue& p_Object, const std::string_view (&p_Keys)[N])
+    std::string DescribeFieldsLabelled(std::string_view p_Label, const TelemetryValue& p_Object, const std::string_view (&p_Keys)[N])
     {
-        std::string s_Out = "fields:";
+        std::string s_Out = fmt::format("{}:", p_Label);
 
         for (size_t i = 0; i < N; ++i)
         {
@@ -305,6 +322,12 @@ namespace
         }
 
         return s_Out;
+    }
+
+    template <size_t N>
+    std::string DescribeFields(const TelemetryValue& p_Object, const std::string_view (&p_Keys)[N])
+    {
+        return DescribeFieldsLabelled("fields", p_Object, p_Keys);
     }
 
     // Optional string with the described kind on failure (items and objectives).
@@ -350,6 +373,60 @@ namespace
         }
 
         p_Out = s_Field->boolean;
+        return true;
+    }
+
+    // Required bool with the described kind on failure (player state): the boolean subject of a
+    // row. Missing is malformed; present must be a bool (an Unsupported copy of the engine's
+    // actual type is reported by its type name).
+    bool ReadBoolDescribed(const TelemetryValue& p_Object, std::string_view p_Key, bool& p_Out, std::string& p_Detail)
+    {
+        const auto* s_Field = p_Object.Find(p_Key);
+
+        if (!s_Field)
+        {
+            p_Detail = fmt::format("missing field '{}'", p_Key);
+            return false;
+        }
+
+        if (s_Field->kind != TelemetryValue::Kind::Bool)
+        {
+            p_Detail = fmt::format("field '{}' is not a bool ({})", p_Key, DescribeValue(*s_Field));
+            return false;
+        }
+
+        p_Out = s_Field->boolean;
+        return true;
+    }
+
+    // Optional finite number: absent is fine; present must be a Number that is finite (the
+    // stream's float form "6.000000" is a number; NaN or an infinity is not a value Relay carries).
+    // The value is kept as copied, not rounded, not interpreted.
+    bool ReadOptionalFiniteNumberDescribed(
+        const TelemetryValue& p_Object, std::string_view p_Key, std::optional<double>& p_Out, std::string& p_Detail
+    )
+    {
+        const auto* s_Field = p_Object.Find(p_Key);
+
+        if (!s_Field)
+        {
+            p_Out.reset();
+            return true;
+        }
+
+        if (s_Field->kind != TelemetryValue::Kind::Number)
+        {
+            p_Detail = fmt::format("field '{}' is not a number ({})", p_Key, DescribeValue(*s_Field));
+            return false;
+        }
+
+        if (!std::isfinite(s_Field->number))
+        {
+            p_Detail = fmt::format("field '{}' is not a finite number", p_Key);
+            return false;
+        }
+
+        p_Out = s_Field->number;
         return true;
     }
 }
@@ -457,6 +534,8 @@ TelemetryNormalizer::Result TelemetryNormalizer::Normalize(const TelemetryObserv
             s_Result = NormalizeItem(p_Observation, ItemEvent::Kind::RemovedFromInventory);
             break;
         case Family::ObjectiveCompleted: s_Result = NormalizeObjective(p_Observation); break;
+        case Family::PlayerTrespassing: s_Result = NormalizeTrespassing(p_Observation); break;
+        case Family::PlayerIllegalWeapon: s_Result = NormalizeIllegalWeapon(p_Observation); break;
     }
 
     s_Result.gating = s_Source->gating;
@@ -700,6 +779,130 @@ TelemetryNormalizer::Result TelemetryNormalizer::NormalizeObjective(const Teleme
     ++m_Counters.normalized;
     s_Result.outcome = Outcome::Normalized;
     s_Result.objective = std::move(s_Event);
+    return s_Result;
+}
+
+TelemetryNormalizer::Result TelemetryNormalizer::NormalizeTrespassing(const TelemetryObservation& p_Observation)
+{
+    const TelemetryValue& s_Value = p_Observation.value;
+
+    // Two recorded payloads (B0, design section 46.1): {IsTrespassing, RoomId}. The boolean is the
+    // subject and required; RoomId is optional, a finite number when present, carried verbatim.
+    // No player-state payload has crossed the typed intake, so every rejection carries the
+    // per-field detail over both keys: copied kinds are the only evidence a rejection can give.
+    if (s_Value.kind != TelemetryValue::Kind::Object)
+        return Malformed(p_Observation, fmt::format("Value is not an object ({})", DescribeValue(s_Value)));
+
+    auto s_Malformed = [&](const std::string& p_Detail) {
+        return Malformed(p_Observation, fmt::format("{}; {}", p_Detail, DescribeFields(s_Value, k_TrespassingFields)));
+    };
+
+    PlayerTrespassingEvent s_Event;
+    s_Event.engine_event = p_Observation.name;
+
+    std::string s_Detail;
+
+    if (!ReadBoolDescribed(s_Value, "IsTrespassing", s_Event.trespassing, s_Detail)
+        || !ReadOptionalFiniteNumberDescribed(s_Value, "RoomId", s_Event.room_id, s_Detail))
+    {
+        return s_Malformed(s_Detail);
+    }
+
+    // Provenance from the stream envelope, as on the other attempt-gated rows: optional.
+    if (!p_Observation.contract_session_id.empty())
+        s_Event.contract_session_id = p_Observation.contract_session_id;
+
+    if (p_Observation.has_timestamp)
+        s_Event.engine_timestamp_s = p_Observation.timestamp_s;
+
+    Result s_Result;
+    ++m_Counters.normalized;
+    s_Result.outcome = Outcome::Normalized;
+    s_Result.trespassing = std::move(s_Event);
+    return s_Result;
+}
+
+TelemetryNormalizer::Result TelemetryNormalizer::NormalizeIllegalWeapon(const TelemetryObservation& p_Observation)
+{
+    const TelemetryValue& s_Value = p_Observation.value;
+
+    // Four recorded payloads (B0, design section 46.1): {IsHoldingIllegalWeapon, WeaponEquipped}
+    // on the true form, {IsHoldingIllegalWeapon} on the false form. The boolean is the subject and
+    // required. WeaponEquipped is optional whatever the boolean says: absent is valid on either
+    // form; present it must be an object whose item fields obey the B4 rules, else the occurrence
+    // is malformed (a present object the normalizer cannot read is not silently dropped). The
+    // rejection detail lists the two top-level keys and, when WeaponEquipped is an object, its keys.
+    if (s_Value.kind != TelemetryValue::Kind::Object)
+        return Malformed(p_Observation, fmt::format("Value is not an object ({})", DescribeValue(s_Value)));
+
+    const auto* s_Weapon = s_Value.Find("WeaponEquipped");
+
+    auto s_Malformed = [&](const std::string& p_Detail) {
+        std::string s_Listing = DescribeFields(s_Value, k_IllegalWeaponFields);
+
+        if (s_Weapon && s_Weapon->kind == TelemetryValue::Kind::Object)
+            s_Listing += "; " + DescribeFieldsLabelled("weapon fields", *s_Weapon, k_WeaponFields);
+
+        return Malformed(p_Observation, fmt::format("{}; {}", p_Detail, s_Listing));
+    };
+
+    PlayerIllegalWeaponEvent s_Event;
+    s_Event.engine_event = p_Observation.name;
+
+    std::string s_Detail;
+
+    if (!ReadBoolDescribed(s_Value, "IsHoldingIllegalWeapon", s_Event.holding, s_Detail))
+        return s_Malformed(s_Detail);
+
+    if (s_Weapon)
+    {
+        if (s_Weapon->kind != TelemetryValue::Kind::Object)
+            return s_Malformed(fmt::format("field 'WeaponEquipped' is not an object ({})", DescribeValue(*s_Weapon)));
+
+        // The nested object under the B4 item rules: the definition id is required and non-empty
+        // (its format unchecked; a copied ZString or a rendered ZRepositoryID both accepted).
+        const auto* s_Id = s_Weapon->Find("RepositoryId");
+
+        if (!s_Id)
+            return s_Malformed("missing field 'WeaponEquipped.RepositoryId'");
+
+        if (s_Id->kind != TelemetryValue::Kind::String)
+            return s_Malformed(fmt::format("field 'WeaponEquipped.RepositoryId' is not a string ({})", DescribeValue(*s_Id)));
+
+        if (s_Id->text.empty())
+            return s_Malformed("field 'WeaponEquipped.RepositoryId' is empty");
+
+        IllegalWeaponObservation s_Observed;
+        s_Observed.item_repository_id = s_Id->text;
+
+        if (!ReadOptionalStringDescribed(*s_Weapon, "InstanceId", s_Observed.item_instance_id, s_Detail)
+            || !ReadOptionalStringDescribed(*s_Weapon, "ItemName", s_Observed.item_name, s_Detail)
+            || !ReadOptionalStringDescribed(*s_Weapon, "ItemType", s_Observed.item_type, s_Detail)
+            || !ReadOptionalStringArray(*s_Weapon, "OnlineTraits", s_Observed.online_traits, s_Detail)
+            || !ReadOptionalBoolDescribed(*s_Weapon, "IsPerceivedAsWeapon", s_Observed.perceived_as_weapon, s_Detail))
+        {
+            return s_Malformed("WeaponEquipped: " + s_Detail);
+        }
+
+        // As B4: an instance id is carried only when the engine named one.
+        if (s_Observed.item_instance_id && s_Observed.item_instance_id->empty())
+            s_Observed.item_instance_id.reset();
+
+        // Deliberately not read: Category (null in B0) and ActionRewardType, as in the item rows.
+        s_Event.weapon = std::move(s_Observed);
+    }
+
+    // Provenance from the stream envelope: optional.
+    if (!p_Observation.contract_session_id.empty())
+        s_Event.contract_session_id = p_Observation.contract_session_id;
+
+    if (p_Observation.has_timestamp)
+        s_Event.engine_timestamp_s = p_Observation.timestamp_s;
+
+    Result s_Result;
+    ++m_Counters.normalized;
+    s_Result.outcome = Outcome::Normalized;
+    s_Result.illegal_weapon = std::move(s_Event);
     return s_Result;
 }
 
