@@ -93,7 +93,29 @@ namespace
         wcscpy_s(g_Path, s_Path);
     }
 
-    void WriteLine(Level p_Level, std::string_view p_Message, bool p_TakeLock)
+    RelayLog::RawWriter g_RawWriter = nullptr;
+
+    // The one WriteFile. Called under the lock, after OpenLocked.
+    RelayLog::RawWrite FileWrite(const char* p_Data, uint32_t p_Size)
+    {
+        RelayLog::RawWrite s_Raw;
+
+        if (g_File == INVALID_HANDLE_VALUE)
+            return s_Raw;
+
+        s_Raw.file_open = true;
+        DWORD s_Written = 0;
+
+        if (WriteFile(g_File, p_Data, p_Size, &s_Written, nullptr))
+            s_Raw.succeeded = true;
+        else
+            s_Raw.error = GetLastError();
+
+        s_Raw.written = s_Written;
+        return s_Raw;
+    }
+
+    RelayLog::WriteOutcome WriteLine(Level p_Level, std::string_view p_Message, bool p_TakeLock)
     {
         SYSTEMTIME s_Now;
         GetSystemTime(&s_Now);
@@ -118,27 +140,67 @@ namespace
         s_Line.append(p_Message);
         s_Line.push_back('\n');
 
+        const uint32_t s_Size = static_cast<uint32_t>(s_Line.size());
+
         if (p_TakeLock)
             AcquireSRWLockExclusive(&g_Lock);
 
         OpenLocked();
 
-        if (g_File != INVALID_HANDLE_VALUE)
-        {
-            DWORD s_Written = 0;
-            WriteFile(g_File, s_Line.data(), static_cast<DWORD>(s_Line.size()), &s_Written, nullptr);
-        }
+        const RelayLog::RawWrite s_Raw = g_RawWriter ? g_RawWriter(s_Line.data(), s_Size) : FileWrite(s_Line.data(), s_Size);
 
         if (p_TakeLock)
             ReleaseSRWLockExclusive(&g_Lock);
 
         OutputDebugStringA(("[GlacierRelay] " + s_Line).c_str());
+
+        RelayLog::WriteOutcome s_Outcome;
+        s_Outcome.requested = s_Size;
+        s_Outcome.written = s_Raw.written;
+        s_Outcome.error = s_Raw.error;
+
+        if (!s_Raw.file_open)
+            s_Outcome.status = RelayLog::WriteStatus::FileUnavailable;
+        else if (!s_Raw.succeeded)
+            s_Outcome.status = RelayLog::WriteStatus::WriteFailed;
+        else if (s_Raw.written != s_Size)
+            s_Outcome.status = RelayLog::WriteStatus::ShortWrite;
+        else
+            s_Outcome.status = RelayLog::WriteStatus::Written;
+
+        return s_Outcome;
     }
 }
 
 void RelayLog::Write(Level p_Level, std::string_view p_Message)
 {
     WriteLine(p_Level, p_Message, true);
+}
+
+RelayLog::WriteOutcome RelayLog::WriteChecked(Level p_Level, std::string_view p_Message)
+{
+    return WriteLine(p_Level, p_Message, true);
+}
+
+const char* RelayLog::WriteStatusText(WriteStatus p_Status)
+{
+    switch (p_Status)
+    {
+        case WriteStatus::Written: return "written";
+        case WriteStatus::FileUnavailable: return "file_unavailable";
+        case WriteStatus::WriteFailed: return "write_failed";
+        case WriteStatus::ShortWrite: return "short_write";
+    }
+    return "file_unavailable";
+}
+
+RelayLog::RawWriter RelayLog::SetRawWriterForTests(RawWriter p_Writer)
+{
+    AcquireSRWLockExclusive(&g_Lock);
+    const RawWriter s_Previous = g_RawWriter;
+    g_RawWriter = p_Writer;
+    ReleaseSRWLockExclusive(&g_Lock);
+    return s_Previous;
 }
 
 namespace

@@ -13,6 +13,7 @@
 #include "CommandScheduler.h"
 #include "FakeOutfitApplier.h"
 #include "OutfitApply.h"
+#include "RelayLog.h"
 #include "TestListener.h"
 
 using namespace CommandProtocol;
@@ -125,6 +126,45 @@ namespace
     bool Contains(const std::string& p_Text, const std::string& p_Needle)
     {
         return p_Text.find(p_Needle) != std::string::npos;
+    }
+
+    // The scripted raw log writer for the checked "applying" line (correction B): a captureless
+    // function, so its script and its record are statics. It never touches a file.
+    struct LogScript
+    {
+        bool file_open = true;
+        bool succeeded = true;
+        uint32_t short_by = 0;
+        uint32_t error = 0;
+    };
+
+    LogScript g_LogScript;
+    int g_LogWrites = 0;
+    std::vector<std::string> g_LogLines;
+    const FakeOutfit::Applier* g_LogApplier = nullptr;
+    int g_InvokesAtLastWrite = -1;
+
+    RelayLog::RawWrite ScriptedRawWrite(const char* p_Data, uint32_t p_Size)
+    {
+        ++g_LogWrites;
+        g_LogLines.emplace_back(p_Data, p_Size);
+        g_InvokesAtLastWrite = g_LogApplier ? g_LogApplier->invokes : -1;
+
+        RelayLog::RawWrite s_Raw;
+        s_Raw.file_open = g_LogScript.file_open;
+        s_Raw.succeeded = g_LogScript.file_open && g_LogScript.succeeded;
+        s_Raw.written = s_Raw.succeeded ? (p_Size > g_LogScript.short_by ? p_Size - g_LogScript.short_by : 0) : 0;
+        s_Raw.error = g_LogScript.error;
+        return s_Raw;
+    }
+
+    void ResetLogScript(const FakeOutfit::Applier* p_Applier)
+    {
+        g_LogScript = LogScript{};
+        g_LogWrites = 0;
+        g_LogLines.clear();
+        g_LogApplier = p_Applier;
+        g_InvokesAtLastWrite = -1;
     }
 
     struct Run
@@ -299,6 +339,141 @@ void RunOutfitApplyTests()
                 CHECK(s_Next.result.status == Status::Unavailable && Contains(s_Next.result.reason, "effectful_latched") && s_Applier.invokes == 1);
             }
         }
+    }
+
+    // --- the checked "applying" line before the one call (correction B, M5 design section 30) ------
+    {
+        const RelayLog::RawWriter s_PreviousWriter = RelayLog::SetRawWriterForTests(&ScriptedRawWrite);
+        CHECK(s_PreviousWriter == nullptr);
+
+        // RelayLog's own classification of the four raw outcomes, with the byte counts and the error.
+        {
+            ResetLogScript(nullptr);
+            auto s_Outcome = RelayLog::WriteChecked(RelayLog::Level::Info, "checked write probe");
+            CHECK(s_Outcome.status == RelayLog::WriteStatus::Written && s_Outcome.written == s_Outcome.requested && s_Outcome.requested > 0 && s_Outcome.error == 0);
+            CHECK(g_LogWrites == 1 && Contains(g_LogLines[0], "checked write probe\n") && g_LogLines[0].size() == s_Outcome.requested);
+
+            g_LogScript.file_open = false;
+            s_Outcome = RelayLog::WriteChecked(RelayLog::Level::Info, "checked write probe");
+            CHECK(s_Outcome.status == RelayLog::WriteStatus::FileUnavailable && s_Outcome.written == 0);
+
+            g_LogScript = LogScript{};
+            g_LogScript.succeeded = false;
+            g_LogScript.error = 5;
+            s_Outcome = RelayLog::WriteChecked(RelayLog::Level::Info, "checked write probe");
+            CHECK(s_Outcome.status == RelayLog::WriteStatus::WriteFailed && s_Outcome.written == 0 && s_Outcome.error == 5);
+
+            g_LogScript = LogScript{};
+            g_LogScript.short_by = 7;
+            s_Outcome = RelayLog::WriteChecked(RelayLog::Level::Info, "checked write probe");
+            CHECK(s_Outcome.status == RelayLog::WriteStatus::ShortWrite && s_Outcome.written + 7 == s_Outcome.requested);
+            CHECK(std::string(RelayLog::WriteStatusText(RelayLog::WriteStatus::Written)) == "written" && std::string(RelayLog::WriteStatusText(RelayLog::WriteStatus::ShortWrite)) == "short_write");
+        }
+
+        // The successful case: exactly one applying line, accepted in full, written before the one
+        // invoke; the classification is the one the earlier success case established.
+        {
+            FakeOutfit::Applier s_Applier;
+            ResetLogScript(&s_Applier);
+            const auto s_Pending = Pending(SetOutfit(CommandTest::Uuid(40)));
+            const auto s_Run = Apply(PlayingContext(s_Pending), s_Applier);
+            CHECK(s_Run.result.status == Status::Applied && s_Run.outcome.invocation == Invocation::Called && s_Run.outcome.effect == Effect::Changed);
+            CHECK(s_Applier.invokes == 1 && s_Applier.readbacks == 1 && s_Applier.releases == 1);
+            CHECK(g_LogWrites == 1 && g_InvokesAtLastWrite == 0);
+            CHECK(Contains(g_LogLines[0], "applying player.outfit.set/2 on frame 100") && Contains(g_LogLines[0], CommandTest::Uuid(40)) && Contains(g_LogLines[0], "-> requested " + std::string(k_Target) + "/0/0"));
+            CHECK(TextField(s_Run.result, "apply_log") == "written" && BoolField(s_Run.result, "setter_called", true) && TextField(s_Run.result, "effect") == "changed");
+            CHECK(EncodeResult(s_Run.result).size() <= k_MaxLineBytes && !s_Run.outcome.reduced);
+        }
+
+        // The three ways the line can fail to be accepted: unavailable, apply_log_unwritten, the
+        // setter never invoked, no read-back, the effect none, the gate's verdict still reported.
+        {
+            struct Case { const char* label; const char* status_text; void (*arrange)(); };
+            const Case s_Cases[] = {
+                {"file-open failure", "file_unavailable", [] { g_LogScript.file_open = false; }},
+                {"failed write", "write_failed", [] { g_LogScript.succeeded = false; g_LogScript.error = 1784; }},
+                {"short write", "short_write", [] { g_LogScript.short_by = 1; }},
+            };
+
+            for (const auto& s_Case : s_Cases)
+            {
+                FakeOutfit::Applier s_Applier;
+                ResetLogScript(&s_Applier);
+                s_Case.arrange();
+                const auto s_Pending = Pending(SetOutfit(CommandTest::Uuid(41)));
+                const auto s_Run = Apply(PlayingContext(s_Pending), s_Applier);
+                const bool s_Status = s_Run.result.status == Status::Unavailable && Contains(s_Run.result.reason, "apply_log_unwritten") && Contains(s_Run.result.reason, s_Case.status_text) && Contains(s_Run.result.reason, "the setter was not called");
+                CHECK(s_Status);
+                if (!s_Status)
+                    std::printf("  case '%s': status %s reason %s\n", s_Case.label, StatusText(s_Run.result.status), s_Run.result.reason.c_str());
+                CHECK(s_Applier.invokes == 0 && s_Applier.readbacks == 0 && s_Applier.observes == 1 && s_Applier.releases == 1);
+                CHECK(g_LogWrites == 1 && Contains(g_LogLines[0], CommandTest::Uuid(41)));
+                CHECK(s_Run.outcome.invocation == Invocation::NotCalled && s_Run.outcome.effect == Effect::None && s_Run.outcome.precondition_ok);
+                CHECK(BoolField(s_Run.result, "setter_called", false) && TextField(s_Run.result, "invocation") == "not_called" && TextField(s_Run.result, "effect") == "none");
+                CHECK(TextField(s_Run.result, "apply_log") == s_Case.status_text && BoolField(s_Run.result, "precondition_ok", true));
+                CHECK(FieldIs(s_Run.result, "current_outfit_id", FieldStatus::Unavailable) && FieldIs(s_Run.result, "generation_post", FieldStatus::Unavailable));
+                CHECK(TextField(s_Run.result, "previous_outfit_id") == k_Suit && TextField(s_Run.result, "requested_outfit_id") == k_Target);
+                CHECK(EncodeResult(s_Run.result).size() <= k_MaxLineBytes && !s_Run.outcome.reduced);
+                if (s_Case.status_text == std::string("write_failed"))
+                    CHECK(Contains(s_Run.result.reason, "error 1784"));
+
+                // The path is not latched by a log failure: the next command with a working log applies.
+                ResetLogScript(&s_Applier);
+                const auto s_Next = Apply(PlayingContext(s_Pending), s_Applier);
+                CHECK(s_Next.result.status == Status::Applied && s_Applier.invokes == 1 && g_LogWrites == 1);
+            }
+        }
+
+        // A refusal by the gate writes no applying line (nothing is logged before the verdict), and
+        // on the default-disabled path (no applier on the frame) the scheduler writes nothing at
+        // all while rejecting the effectful command.
+        {
+            FakeOutfit::Applier s_Applier;
+            ResetLogScript(&s_Applier);
+            auto s_Pending = Pending(SetOutfit(CommandTest::Uuid(42)));
+            auto s_Context = PlayingContext(s_Pending);
+            s_Context.mission_playing = false;
+            const auto s_Run = Apply(s_Context, s_Applier);
+            CHECK(s_Run.result.status == Status::PreconditionFailed && g_LogWrites == 0 && s_Applier.invokes == 0);
+            CHECK(TextField(s_Run.result, "apply_log") == "not_attempted");
+
+            CommandQueue s_Queue;
+            std::vector<Result> s_Results;
+            CommandScheduler s_Scheduler(s_Queue, [&](const Result& p_Result) { s_Results.push_back(p_Result); });
+            CommandQueue::FrameSnapshot s_Snapshot;
+            s_Snapshot.mission_generation = k_Gen1;
+            s_Snapshot.relay_transition_epoch = 1;
+            s_Queue.PublishSnapshot(s_Snapshot);
+            s_Queue.Push(SetOutfit(CommandTest::Uuid(43)), 1, 4900);
+
+            CommandScheduler::FrameObservation s_Observation;
+            s_Observation.frame = 100;
+            s_Observation.now_mono_ms = 5000;
+            s_Observation.native_at = "t";
+            s_Observation.thread_id = GetCurrentThreadId();
+            s_Observation.scene_available = true;
+            s_Observation.scene.available = true;
+            s_Observation.scene.scene_loaded = true;
+            s_Observation.scene.loading_stage = 8;
+            s_Observation.scene.scene_type = "mission";
+            s_Observation.mission_playing = true;
+            s_Observation.previous_frame_playing = true;
+            s_Observation.mission_generation = k_Gen1;
+            s_Observation.link_generation = 1;
+            s_Observation.adapter_instance_id = CommandTest::Uuid(99);
+            s_Observation.relay_transition_epoch = 1;
+            s_Observation.rise_frame = 1;
+            s_Observation.applier = nullptr;
+            s_Observation.link_generation_now = [] { return uint64_t(1); };
+
+            ResetLogScript(nullptr);
+            CHECK(s_Scheduler.Tick(s_Observation));
+            CHECK(s_Results.size() == 1 && s_Results[0].status == Status::Rejected && Contains(s_Results[0].reason, "no outfit applier"));
+            CHECK(g_LogWrites == 0);
+        }
+
+        CHECK(RelayLog::SetRawWriterForTests(s_PreviousWriter) == &ScriptedRawWrite);
+        ResetLogScript(nullptr);
     }
 
     // --- through the scheduler: dispatch, expiry, duplicate, link loss, no applier -------------------

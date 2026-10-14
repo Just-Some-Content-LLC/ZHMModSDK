@@ -94,7 +94,7 @@ namespace OutfitApply
                 "previous_outfit_id", "previous_charset", "previous_variation",
                 "requested_outfit_id", "requested_charset", "requested_variation",
                 "current_outfit_id", "current_charset", "current_variation",
-                "setter_called", "invocation", "effect", "precondition_ok", "precondition_reasons",
+                "setter_called", "apply_log", "invocation", "effect", "precondition_ok", "precondition_reasons",
             };
             for (const char* s_Name : k_Keep)
                 if (p_Name == s_Name)
@@ -172,11 +172,17 @@ namespace OutfitApply
         const std::optional<OutfitTuple> s_Previous = TupleOf(s_Reads.hero);
 
         // 3–6. The call, only when every rule held, after the link generation is re-read once more
-        //      and the "applying" line is durable.
+        //      and the "applying" line was accepted by the operating system in full (M5 design
+        //      section 30, correction B): the write is checked, and the setter is not asked for
+        //      when the line could not be written — an engine write without its pre-call record
+        //      would leave a fail-stop with no evidence that the engine was asked. A written line
+        //      is a submission to the OS file cache, not power-loss durability.
         CallOutcome s_Call;
         OutfitObservation::EngineReads s_Post;
         bool s_PostRead = false;
         bool s_LinkChangedAtCall = false;
+        bool s_ApplyLogAttempted = false;
+        RelayLog::WriteOutcome s_ApplyLog;
 
         if (s_Verdict.ok)
         {
@@ -188,7 +194,8 @@ namespace OutfitApply
             }
             else
             {
-                RelayLog::Info(
+                s_ApplyLogAttempted = true;
+                s_ApplyLog = RelayLog::InfoChecked(
                     "command: {} applying player.outfit.set/2 on frame {}: previous {}/{}/{} -> requested {}/{}/{}; generations expected {} fresh {}; epoch {}; link generation {}",
                     s_Command.command_id, p_Context.frame,
                     s_Previous ? s_Previous->outfit_id : "?", s_Previous ? s_Previous->charset : -1, s_Previous ? s_Previous->variation : -1,
@@ -198,11 +205,16 @@ namespace OutfitApply
                     p_Context.relay_transition_epoch, s_LinkAtCall
                 );
 
-                s_Call = p_Applier.Invoke(s_Target.charset, s_Target.variation);
-                s_Post = p_Applier.ReadBack();
-                s_PostRead = true;
+                if (s_ApplyLog.status == RelayLog::WriteStatus::Written)
+                {
+                    s_Call = p_Applier.Invoke(s_Target.charset, s_Target.variation);
+                    s_Post = p_Applier.ReadBack();
+                    s_PostRead = true;
+                }
             }
         }
+
+        const bool s_ApplyLogUnwritten = s_ApplyLogAttempted && s_ApplyLog.status != RelayLog::WriteStatus::Written;
 
         p_Applier.Release();
 
@@ -227,6 +239,16 @@ namespace OutfitApply
             s_Outcome.effect = Effect::None;
             p_Result.status = Status::Unavailable;
             p_Result.reason = "not applied (unavailable): link_generation_changed immediately before the call";
+        }
+        else if (s_ApplyLogUnwritten)
+        {
+            s_Outcome.invocation = Invocation::NotCalled;
+            s_Outcome.effect = Effect::None;
+            p_Result.status = Status::Unavailable;
+            p_Result.reason = fmt::format(
+                "not applied (unavailable): apply_log_unwritten ({}: {} of {} bytes accepted, error {}); the setter was not called",
+                RelayLog::WriteStatusText(s_ApplyLog.status), s_ApplyLog.written, s_ApplyLog.requested, s_ApplyLog.error
+            );
         }
         else if (s_Call.faulted)
         {
@@ -331,6 +353,7 @@ namespace OutfitApply
         Append(s_Out, "reads_on_frame", s_Latched ? Field<bool>::Of(FieldStatus::Unavailable, "effectful path latched") : Field<bool>::Observed(s_Reads.thread_id == p_Context.thread_id));
         Append(s_Out, "link_generation_at_call", Field<int64_t>::Observed(static_cast<int64_t>(s_LinkNow)));
         Append(s_Out, "setter_called", Field<bool>::Observed(s_Call.called));
+        AppendText(s_Out, "apply_log", s_ApplyLogAttempted ? RelayLog::WriteStatusText(s_ApplyLog.status) : "not_attempted");
         AppendText(s_Out, "invocation", InvocationText(s_Outcome.invocation));
         AppendText(s_Out, "effect", EffectText(s_Outcome.effect));
         Append(s_Out, "precondition_ok", Field<bool>::Observed(s_Verdict.ok));

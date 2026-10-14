@@ -11,8 +11,9 @@
 // Fault semantics (M5 design section 25 §4.5, reviewed for C-2B): RelayLog::Guard is an SEH filter
 // that logs and returns EXCEPTION_CONTINUE_SEARCH — it never handles the exception, so a fault
 // raised inside the setter keeps propagating to the engine's own handling, which on this build
-// terminates the process. That is the fail-stop: the "applying" line already in the durable
-// native log (written by OutfitApply before Invoke) and the FAULT line are the evidence that the
+// terminates the process. That is the fail-stop: the "applying" line already accepted into the
+// native log file (written and checked by OutfitApply before Invoke; in the OS file cache, which
+// survives the process ending but not a power loss) and the FAULT line are the evidence that the
 // engine was asked, and BEAM holds the command as unknown with a possible effect (link lost).
 // Invoke can therefore return "faulted" only if some outer handler resumed the process, in which
 // case the effect is reported uncertain and the latch below refuses every later effectful

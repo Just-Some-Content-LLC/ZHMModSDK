@@ -10,13 +10,16 @@
 
 struct _EXCEPTION_POINTERS;
 
-// Durable log for the Glacier Relay adapter. Derived from the Hitmen probe's HitmenLog
+// Native log for the Glacier Relay adapter. Derived from the Hitmen probe's HitmenLog
 // (research/hitmen-revival, ff19bd57 and e748cdde), which was validated in the first runtime load.
 //
 // The SDK's own file log buffers and is only flushed from a destructor that never runs, because the
 // game terminates its own process at exit (glacier-relay HITMEN_COMPILE_ARCHAEOLOGY.md, experiment
 // 4, F9). This log does not go through it: every line is one unbuffered WriteFile to a per-process
-// file outside the game directory, and goes to OutputDebugString for an attached debugger.
+// file outside the game directory, and goes to OutputDebugString for an attached debugger. A line
+// WriteFile accepted is in the operating system's file cache: it survives this process ending in
+// any way, but nothing here flushes it to the disk (no FlushFileBuffers, no write-through), so it
+// is not durable across a power loss or an operating-system crash (M5 design section 29.5).
 //
 //   %LOCALAPPDATA%\GlacierRelay\Relay\relay-<process start, UTC>-<pid>.log
 //   (or $GLACIERRELAY_LOG_DIR\relay-...log when that variable is set)
@@ -54,6 +57,54 @@ namespace RelayLog
     {
         Write(Level::Error, fmt::format(p_Format, std::forward<Args>(p_Args)...));
     }
+
+    // M5 C-2B correction B (M5 design section 30): the outcome of one line's write, for the one
+    // line that must be in the file before an engine write is asked for (OutfitApply's "applying"
+    // line). Written means the file was open and WriteFile returned success having accepted every
+    // byte of the line: a successful submission to the operating system, which is not a flush, not
+    // power-loss durability, and says nothing about what happens after it.
+    enum class WriteStatus
+    {
+        Written,         // the whole line was accepted by the operating system
+        FileUnavailable, // the log file could not be opened (no directory, CreateFileW failed) or is closed
+        WriteFailed,     // WriteFile returned failure
+        ShortWrite,      // WriteFile returned success with fewer bytes than the line
+    };
+
+    const char* WriteStatusText(WriteStatus p_Status);
+
+    struct WriteOutcome
+    {
+        WriteStatus status = WriteStatus::FileUnavailable;
+        uint32_t requested = 0; // bytes of the line (prefix, message, newline)
+        uint32_t written = 0;   // bytes WriteFile reported accepted
+        uint32_t error = 0;     // GetLastError after a failed WriteFile, else 0
+    };
+
+    // Writes one line like Write and reports how the write went. Ordinary diagnostics keep using
+    // Info/Warn/Error, whose result is still ignored.
+    WriteOutcome WriteChecked(Level p_Level, std::string_view p_Message);
+
+    template <typename... Args>
+    WriteOutcome InfoChecked(fmt::format_string<Args...> p_Format, Args&&... p_Args)
+    {
+        return WriteChecked(Level::Info, fmt::format(p_Format, std::forward<Args>(p_Args)...));
+    }
+
+    // The raw file write beneath every line (the one WriteFile, under the lock, after the lazy
+    // open) as a replaceable function, so the engine-independent tests can script an unopened
+    // file, a failed write and a short write without a real file. Null, the default, is the file
+    // write. Tests only; the DLL never sets it. Returns the previous writer.
+    struct RawWrite
+    {
+        bool file_open = false;
+        bool succeeded = false;
+        uint32_t written = 0;
+        uint32_t error = 0;
+    };
+
+    using RawWriter = RawWrite (*)(const char* p_Data, uint32_t p_Size);
+    RawWriter SetRawWriterForTests(RawWriter p_Writer);
 
     // SEH filter for Guard. Logs the exception and always returns EXCEPTION_CONTINUE_SEARCH.
     int LogFault(const char* p_Where, _EXCEPTION_POINTERS* p_Info);

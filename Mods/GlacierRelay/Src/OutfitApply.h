@@ -17,10 +17,12 @@
 // frame, inside the scheduler's dispatch: (1) the gate — PreconditionEvaluator over the fresh reads
 // of this frame with the effectful rules, every failure reported with its reasons and nothing
 // asked of the engine; (2) the prior tuple recorded from those reads; (3) the link generation
-// re-read immediately before the call; (4) the "applying" line written to the durable native log
-// before the call; (5) exactly one Invoke; (6) the read-back after the call; (7) the effect
-// classification — changed / unchanged / uncertain — and the bounded result. A void setter that
-// returned is never, by itself, a changed state; a fault is never "definitely unapplied".
+// re-read immediately before the call; (4) the "applying" line written to the native log with a
+// checked write — no Invoke unless the operating system accepted the whole line (status
+// unavailable, reason apply_log_unwritten, otherwise; an accepted line is in the OS file cache,
+// not power-loss durable); (5) exactly one Invoke; (6) the read-back after the call; (7) the
+// effect classification — changed / unchanged / uncertain — and the bounded result. A void setter
+// that returned is never, by itself, a changed state; a fault is never "definitely unapplied".
 namespace OutfitApply
 {
     // What the scheduler copies from its frame observation for one apply (plain values only).
