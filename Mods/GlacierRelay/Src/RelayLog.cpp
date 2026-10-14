@@ -141,15 +141,24 @@ void RelayLog::Write(Level p_Level, std::string_view p_Message)
     WriteLine(p_Level, p_Message, true);
 }
 
+namespace
+{
+    volatile LONG g_FaultsSeen = 0;
+}
+
+uint32_t RelayLog::FaultsLogged()
+{
+    return static_cast<uint32_t>(InterlockedCompareExchange(&g_FaultsSeen, 0, 0));
+}
+
 int RelayLog::LogFault(const char* p_Where, EXCEPTION_POINTERS* p_Info)
 {
-    static volatile LONG s_Logged = 0;
-
     const auto* s_Record = p_Info->ExceptionRecord;
 
     // On a stack overflow there is no stack left to format a message with. A fault that some outer
-    // handler resumes from could repeat every frame, so stop reporting after a few.
-    if (s_Record->ExceptionCode == EXCEPTION_STACK_OVERFLOW || InterlockedIncrement(&s_Logged) > 16)
+    // handler resumes from could repeat every frame, so stop reporting after a few. The count is
+    // kept whatever happens next (FaultsLogged): it latches the effectful path off.
+    if (s_Record->ExceptionCode == EXCEPTION_STACK_OVERFLOW || InterlockedIncrement(&g_FaultsSeen) > 16)
         return EXCEPTION_CONTINUE_SEARCH;
 
     HMODULE s_Module = nullptr;

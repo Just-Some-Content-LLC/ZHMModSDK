@@ -4,9 +4,11 @@
 #include <string>
 #include <vector>
 
+#include "Attestation.h"
 #include "CommandJson.h"
 #include "CommandLink.h"
 #include "CommandScheduler.h"
+#include "FakeOutfitApplier.h"
 #include "TestListener.h"
 
 using namespace CommandProtocol;
@@ -267,6 +269,151 @@ void RunCommandLinkTests()
         CHECK(std::chrono::steady_clock::now() - s_Start2 < std::chrono::seconds(3));
         CHECK(s_Beam.PeerClosed(2000));
         s_Beam.Stop();
+    }
+
+    // 4. M5 C-2B: a version-2 link (a test-only token): the hello says version 2 and advertises the
+    //    effectful entry only when the setting is on; the attest covers the welcome's nonce, the
+    //    generation and the adapter id with the shared MAC definition; a failed attestation (BEAM
+    //    closing the link) leads to a fresh attest over the new welcome, never a reuse and never a
+    //    fallback to version 1; the other version's welcome is rejected; effectful commands are
+    //    decoded only on this link and one at a time.
+    {
+        const std::string s_Token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        const std::string s_Nonce1 = "514f1d221aefccd9d7fc4193040369cf";
+        const std::string s_Nonce2 = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        const std::string s_Suit = FakeOutfit::World::k_FakeSuit;
+        const std::string s_Target = FakeOutfit::World::k_FakeTarget;
+
+        CommandQueue s_Queue;
+        CommandLink::Options s_Options = Fast(s_Port);
+        s_Options.effectful = true;
+        s_Options.token = s_Token;
+        CommandLink s_Link(s_Options, s_Queue, s_Adapter, MonoMs);
+        CHECK(s_Link.ProtocolVersion() == 2 && s_Link.GetStats().protocol_version == 2 && s_Link.GetStats().effectful);
+
+        Listener s_Beam;
+        CHECK(s_Beam.Start(s_Port));
+
+        // Accept the live connection (skipping abandoned ones), read the hello, answer version 2.
+        std::string s_Hello;
+        for (int s_Attempt = 0; s_Attempt < 20 && s_Hello.empty(); ++s_Attempt)
+        {
+            if (!s_Beam.Accept(3000)) break;
+            s_Hello = s_Beam.ReadLine(1500);
+            if (s_Hello.empty()) s_Beam.CloseClient();
+        }
+        CHECK(Field(s_Hello, "command_protocol_version") == "2" && Field(s_Hello, "kind") == "hello");
+        CHECK(s_Hello.find("\"player.outfit.set/2\"") != std::string::npos && s_Hello.find("\"relay.inspect.outfit/1\"") != std::string::npos);
+        CHECK(s_Hello.find(s_Token) == std::string::npos);
+
+        s_Beam.Send(CommandTest::WelcomeV2(1, s_Nonce1));
+        const std::string s_Attest = s_Beam.ReadLine(2000);
+        CHECK(Field(s_Attest, "kind") == "attest" && Field(s_Attest, "command_protocol_version") == "2");
+        CHECK(Field(s_Attest, "link_generation") == "1" && Field(s_Attest, "adapter_instance_id") == s_Adapter);
+        CHECK(Field(s_Attest, "mac") == Attestation::AttestMac(s_Token, s_Nonce1, 1, s_Adapter));
+        CHECK(WaitUntil(2000, [&] { return s_Link.LinkGeneration() == 1 && s_Link.GetStats().attests_sent == 1; }));
+
+        // Commands and results carry version 2; a version-1 line is a violation that closes the link.
+        s_Beam.Send(CommandTest::Command(CommandTest::Uuid(40), 1, 5000, "relay.probe", 1, "{}", "{}", 2));
+        std::string s_Line = s_Beam.ReadLine(2000);
+        CHECK(Field(s_Line, "status") == "received" && Field(s_Line, "command_protocol_version") == "2");
+
+        // Two effectful commands: the first queued, the second busy; a v2 outfit command without
+        // the effectful decode path would be rejected (checked on the inert link below).
+        const std::string s_Params = CommandTest::OutfitParams(s_Target, 0, 0, s_Suit);
+        s_Beam.Send(CommandTest::Command(CommandTest::Uuid(41), 1, 5000, "player.outfit.set", 2, s_Params, "{\"mission_generation\":\"gen-a\"}", 2));
+        s_Beam.Send(CommandTest::Command(CommandTest::Uuid(42), 1, 5000, "player.outfit.set", 2, s_Params, "{\"mission_generation\":\"gen-a\"}", 2));
+        CHECK(Field(s_Beam.ReadLine(2000), "status") == "received");
+        s_Line = s_Beam.ReadLine(2000);
+        CHECK(Field(s_Line, "status") == "busy" && Field(s_Line, "reason").find("effectful") != std::string::npos);
+        CHECK(WaitUntil(1000, [&] { return s_Queue.GetStats().queued == 2; }) && s_Queue.HasPendingEffectful());
+        // A malformed effectful command (the same tuple) is rejected before the queue.
+        s_Beam.Send(CommandTest::Command(CommandTest::Uuid(43), 1, 5000, "player.outfit.set", 2, CommandTest::OutfitParams(s_Suit, 0, 0, s_Suit), "{\"mission_generation\":\"gen-a\"}", 2));
+        s_Line = s_Beam.ReadLine(2000);
+        CHECK(Field(s_Line, "status") == "rejected" && Field(s_Line, "reason").find("no-op") != std::string::npos);
+
+        s_Beam.Send(CommandTest::Command(CommandTest::Uuid(44), 1));
+        CHECK(s_Beam.PeerClosed(2000));
+        CHECK(WaitUntil(2000, [&] { return s_Link.GetStats().protocol_violations == 1 && s_Link.LinkGeneration() == 0; }));
+        CHECK(s_Queue.GetStats().queued == 0 && s_Link.GetStats().cleared_on_disconnect == 2);
+        s_Beam.CloseClient();
+
+        // Reconnect: a new generation and a new nonce get a new attest (different MAC); the earlier
+        // attestation is never reused.
+        s_Hello.clear();
+        for (int s_Attempt = 0; s_Attempt < 20 && s_Hello.empty(); ++s_Attempt)
+        {
+            if (!s_Beam.Accept(3000)) break;
+            s_Hello = s_Beam.ReadLine(1500);
+            if (s_Hello.empty()) s_Beam.CloseClient();
+        }
+        CHECK(Field(s_Hello, "command_protocol_version") == "2");
+        s_Beam.Send(CommandTest::WelcomeV2(2, s_Nonce2));
+        const std::string s_Attest2 = s_Beam.ReadLine(2000);
+        CHECK(Field(s_Attest2, "link_generation") == "2" && Field(s_Attest2, "mac") == Attestation::AttestMac(s_Token, s_Nonce2, 2, s_Adapter));
+        CHECK(Field(s_Attest2, "mac") != Field(s_Attest, "mac"));
+        CHECK(WaitUntil(2000, [&] { return s_Link.LinkGeneration() == 2 && s_Link.GetStats().attests_sent == 2; }));
+
+        // An attestation failure as BEAM shows it (the link closed right after the attest): the
+        // link reconnects and attests afresh, still version 2.
+        s_Beam.CloseClient();
+        CHECK(WaitUntil(2000, [&] { return s_Link.LinkGeneration() == 0; }));
+        s_Hello.clear();
+        for (int s_Attempt = 0; s_Attempt < 20 && s_Hello.empty(); ++s_Attempt)
+        {
+            if (!s_Beam.Accept(3000)) break;
+            s_Hello = s_Beam.ReadLine(1500);
+            if (s_Hello.empty()) s_Beam.CloseClient();
+        }
+        CHECK(Field(s_Hello, "command_protocol_version") == "2");
+
+        // A version-1 welcome to the version-2 link: rejected; the link never binds a generation
+        // and retries (no fallback).
+        s_Beam.Send(CommandTest::Welcome(3));
+        CHECK(s_Beam.PeerClosed(3000));
+        CHECK(s_Link.LinkGeneration() == 0 && s_Link.GetStats().attests_sent == 2);
+        s_Beam.CloseClient();
+        s_Beam.Stop();
+    }
+
+    // 5. M5 C-2B: a version-1 link (no token) rejects a version-2 welcome and never decodes the
+    //    effectful entry, whatever the setting says about it.
+    {
+        CommandQueue s_Queue;
+        CommandLink::Options s_Options = Fast(s_Port);
+        s_Options.effectful = true; // the setting alone does not make a version-1 link effectful-capable on the wire
+        CommandLink s_Link(s_Options, s_Queue, s_Adapter, MonoMs);
+        CHECK(s_Link.ProtocolVersion() == 1);
+        Listener s_Beam;
+        CHECK(s_Beam.Start(s_Port));
+        std::string s_Hello;
+        for (int s_Attempt = 0; s_Attempt < 20 && s_Hello.empty(); ++s_Attempt)
+        {
+            if (!s_Beam.Accept(3000)) break;
+            s_Hello = s_Beam.ReadLine(1500);
+            if (s_Hello.empty()) s_Beam.CloseClient();
+        }
+        CHECK(Field(s_Hello, "command_protocol_version") == "1");
+        s_Beam.Send(CommandTest::WelcomeV2(1, "514f1d221aefccd9d7fc4193040369cf"));
+        CHECK(s_Beam.PeerClosed(3000) && s_Link.LinkGeneration() == 0 && s_Link.GetStats().attests_sent == 0);
+        s_Beam.CloseClient();
+
+        CHECK(Handshake(s_Beam, s_Link, 2) != "");
+        CHECK(WaitUntil(2000, [&] { return s_Link.LinkGeneration() == 2; }));
+        // On a version-1 link the effectful entry is decoded only if the setting is on — and even
+        // then the authority never advertises it to a version-1 peer; here it is simply the wire
+        // check: a v2 line is a violation on a v1 link.
+        s_Beam.Send(CommandTest::Command(CommandTest::Uuid(50), 2, 5000, "player.outfit.set", 2, CommandTest::OutfitParams(FakeOutfit::World::k_FakeTarget, 0, 0, FakeOutfit::World::k_FakeSuit), "{\"mission_generation\":\"g\"}", 2));
+        CHECK(s_Beam.PeerClosed(2000));
+        CHECK(WaitUntil(2000, [&] { return s_Link.LinkGeneration() == 0; }));
+        s_Beam.Stop();
+
+        // An invalid token is ignored: version 1, no attestation, and the token text is not logged
+        // (checked by the absence of the attest; the log is not read here).
+        CommandLink::Options s_Bad = Fast(s_Port);
+        s_Bad.token = "not-a-token";
+        CommandLink s_Link2(s_Bad, s_Queue, s_Adapter, MonoMs);
+        CHECK(s_Link2.ProtocolVersion() == 1);
     }
 
     WSACleanup();

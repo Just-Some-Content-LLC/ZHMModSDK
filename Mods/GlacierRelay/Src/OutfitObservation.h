@@ -72,6 +72,9 @@ namespace OutfitObservation
         Field<bool> heroa_usable;            // charset 0 has a HeroA collection with at least one variation
         Field<bool> is_hitman_suit;
         Field<int64_t> kits_scanned;         // how many map entries the bounded scan visited
+        // M5 C-2B: the HeroA variation count of every charset (index = charset), so a requested
+        // charset/variation can be bounds-checked exactly; empty when the kit was not found.
+        std::vector<Field<int64_t>> charset_heroa_variations;
     };
 
     struct EngineReads

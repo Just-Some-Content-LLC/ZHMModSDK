@@ -163,11 +163,26 @@ namespace CommandTest
                ",\"node\":\"test\",\"allowlist\":[{\"name\":\"relay.probe\",\"version\":1}]}\n";
     }
 
-    inline std::string Command(const std::string& p_Id, uint64_t p_Generation, uint32_t p_Ttl = 5000, const std::string& p_Name = "relay.probe", uint32_t p_Version = 1, const std::string& p_Params = "{}", const std::string& p_Preconditions = "{}")
+    inline std::string Command(const std::string& p_Id, uint64_t p_Generation, uint32_t p_Ttl = 5000, const std::string& p_Name = "relay.probe", uint32_t p_Version = 1, const std::string& p_Params = "{}", const std::string& p_Preconditions = "{}", uint32_t p_ProtocolVersion = 1)
     {
-        return "{\"command_protocol_version\":1,\"kind\":\"command\",\"command_id\":\"" + p_Id + "\",\"link_generation\":" + std::to_string(p_Generation) +
+        return "{\"command_protocol_version\":" + std::to_string(p_ProtocolVersion) + ",\"kind\":\"command\",\"command_id\":\"" + p_Id + "\",\"link_generation\":" + std::to_string(p_Generation) +
                ",\"issued_at\":\"2026-10-14T00:00:00.000Z\",\"ttl_ms\":" + std::to_string(p_Ttl) + ",\"name\":\"" + p_Name + "\",\"version\":" + std::to_string(p_Version) +
                ",\"params\":" + p_Params + ",\"preconditions\":" + p_Preconditions + "}\n";
+    }
+
+    // M5 C-2B: the version-2 welcome BEAM sends (a nonce and attest_required), and the complete
+    // player.outfit.set v2 parameter object.
+    inline std::string WelcomeV2(uint64_t p_Generation, const std::string& p_Nonce, bool p_Effectful = true)
+    {
+        return "{\"command_protocol_version\":2,\"kind\":\"welcome\",\"link_generation\":" + std::to_string(p_Generation) +
+               ",\"node\":\"test\",\"allowlist\":[" + std::string(p_Effectful ? "{\"name\":\"player.outfit.set\",\"version\":2}," : "") +
+               "{\"name\":\"relay.inspect.outfit\",\"version\":1},{\"name\":\"relay.probe\",\"version\":1}],\"nonce\":\"" + p_Nonce + "\",\"attest_required\":true}\n";
+    }
+
+    inline std::string OutfitParams(const std::string& p_Target, int p_Charset, int p_Variation, const std::string& p_Current, int p_CurrentCharset = 0, int p_CurrentVariation = 0)
+    {
+        return "{\"disguise_repository_id\":\"" + p_Target + "\",\"charset\":" + std::to_string(p_Charset) + ",\"variation\":" + std::to_string(p_Variation) +
+               ",\"expect_current\":{\"disguise_repository_id\":\"" + p_Current + "\",\"charset\":" + std::to_string(p_CurrentCharset) + ",\"variation\":" + std::to_string(p_CurrentVariation) + "}}";
     }
 
     // Deterministic UUID v4 forms for tests: aaaaaaaa-aaaa-4aaa-8aaa-00000000000N.

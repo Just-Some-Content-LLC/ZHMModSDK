@@ -140,6 +140,18 @@ public:
         return m_Queue.size();
     }
 
+    // M5 C-2B: whether an effectful command is already waiting. The link answers a second one
+    // "busy" rather than queueing two effects (the authority keeps one in flight; this is the
+    // native side's own bound).
+    bool HasPendingEffectful() const
+    {
+        std::lock_guard<std::mutex> s_Lock(m_Mutex);
+        for (const auto& s_Pending : m_Queue)
+            if (CommandProtocol::IsEffectful(s_Pending.command.entry))
+                return true;
+        return false;
+    }
+
     // Records the terminal state of an id so a later duplicate is answered as such.
     void MarkDone(const std::string& p_CommandId, uint64_t p_LinkGeneration, CommandProtocol::Status p_Status)
     {

@@ -5,18 +5,21 @@
 #include <string>
 #include <vector>
 
+#include "CommandProtocol.h"
 #include "OutfitObservation.h"
 
-// The hypothetical effectful-command precondition of M5 C-1 (glacier-relay
-// docs/design/M5C_EFFECTFUL_COMMAND_RESEARCH.md section 3), as a pure function over a copied frame
+// The effectful-command precondition (M5 C-1 as the hypothetical evaluator of relay.inspect.outfit;
+// M5 C-2B as the mandatory apply gate of player.outfit.set v2 — glacier-relay
+// docs/design/M5C2_EFFECTFUL_OUTFIT_DESIGN.md section 3), as a pure function over a copied frame
 // observation. It performs no action and reads no engine state: the scheduler hands it plain
-// values gathered on the inspection frame, and it answers whether a hypothetical effectful action
-// would have been allowed and, when not, every reason why. Every reason is a closed code; the
-// evaluation collects all of them rather than stopping at the first so a failing frame can be
-// studied. Nothing here is a guarantee about the engine: the stable-interval constants are the
-// research proposal's numbers, configurable here and documented as such, and elapsed time alone
-// never satisfies the rule — a missing contract start, a changed generation or an active
-// transition fails closed whatever the interval.
+// values gathered on the applying frame, and it answers whether the action is allowed and, when
+// not, every reason why. Every reason is a closed code; the evaluation collects all of them rather
+// than stopping at the first so a failing frame can be studied. Nothing here is a guarantee about
+// the engine: the stable-interval constants are the research proposal's numbers, configurable here
+// and documented as such, and elapsed time alone never satisfies the rule — a missing contract
+// start, a changed generation or an active transition fails closed whatever the interval. Two
+// identical registry reads are one witness among several, never proof of atomic ownership, and
+// an engine event later in the same engine frame remains possible (design section 25 §3.3, W1).
 namespace PreconditionEvaluator
 {
     struct Rules
@@ -61,10 +64,21 @@ namespace PreconditionEvaluator
         // only when the local hero entity and its interface resolved on this frame.
         bool player_available = false;
         OutfitObservation::Field<std::string> hero_outfit_id;
+        OutfitObservation::Field<int64_t> hero_charset;   // M5 C-2B: the complete current tuple
+        OutfitObservation::Field<int64_t> hero_variation;
         OutfitObservation::Field<bool> hero_heroa_valid;
         std::optional<OutfitObservation::KitResolution> candidate;
-        std::optional<std::string> expect_current;
+        std::optional<std::string> expect_current; // C-1: an optional expected current id
         OutfitObservation::Field<bool> set_outfit_available;
+
+        // M5 C-2B (effectful apply gate; absent for an inspection): the requested tuple, the
+        // mandatory expected-current tuple, the link generation re-read immediately before the
+        // call, the thread the scheduler expects, and the fault latch.
+        std::optional<CommandProtocol::OutfitTuple> target;
+        std::optional<CommandProtocol::OutfitTuple> expect_current_tuple;
+        bool link_generation_unchanged = true;
+        bool on_expected_thread = true;
+        bool effectful_latched = false;
     };
 
     enum class Reason
@@ -98,6 +112,16 @@ namespace PreconditionEvaluator
         CandidateNotHeroAUsable,
         ExpectCurrentMismatch,
         SetterUnavailable,
+        // M5 C-2B
+        CurrentTupleUnreadable,      // the hero's charset or variation could not be read
+        ExpectCurrentTupleMismatch,  // the mandatory expected-current tuple differs from the current one
+        TargetEqualsCurrent,         // the requested tuple equals the current one (a no-op)
+        TargetCharsetOutOfBounds,    // the requested charset is not a charset of the candidate kit
+        TargetHeroACollectionInvalid,// the requested charset has no readable HeroA collection
+        TargetVariationOutOfBounds,  // the requested variation is not a HeroA variation of that charset
+        LinkGenerationChanged,       // the link generation re-read before the call differs
+        ThreadMismatch,              // the scheduler is not on the frame-callback thread it started on
+        EffectfulLatched,            // a fault latched the effectful path off
     };
 
     const char* ReasonCode(Reason p_Reason); // a stable snake_case code for the result and the journal
@@ -113,4 +137,9 @@ namespace PreconditionEvaluator
     Verdict Evaluate(const Input& p_Input, const Rules& p_Rules = Rules{});
 
     std::string ReasonsText(const Verdict& p_Verdict); // codes joined by ',' (bounded by the encoder)
+
+    // Reasons that mean "could not establish" rather than "established and false": a required
+    // read was unavailable, the link or thread moved, or the path is latched. The apply reports
+    // them as `unavailable`; everything else as `precondition_failed`.
+    bool IsUnavailability(Reason p_Reason);
 }

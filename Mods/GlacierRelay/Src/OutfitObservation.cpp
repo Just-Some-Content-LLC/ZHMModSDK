@@ -87,5 +87,6 @@ namespace OutfitObservation
             p_Out.heroa_variations = p_Kit.heroa_variations[0];
 
         p_Out.heroa_usable = Field<bool>::Observed(p_Out.heroa_variations.observed() && *p_Out.heroa_variations.value > 0);
+        p_Out.charset_heroa_variations = p_Kit.heroa_variations;
     }
 }

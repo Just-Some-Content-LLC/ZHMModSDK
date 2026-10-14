@@ -12,16 +12,28 @@
 #include "CommandProtocol.h"
 #include "CommandQueue.h"
 
-// The native end of the command link (M5-B, glacier-relay ADR 0009): a second outbound TCP client,
-// separate from the telemetry sink, to BEAM's command listener on loopback. Native still never
-// listens. One network thread owns the socket: it connects with a timeout and backoff, sends the
-// hello, waits for the welcome and binds every later command to the welcome's link generation,
-// reads command lines (at most 4,096 bytes), decodes them strictly, deduplicates and queues them,
-// answers "received" (or busy / duplicate / rejected) itself, and writes the results the frame
-// scheduler produced. It never reads or writes engine state. A lost connection clears the queue
-// (nothing pending is applied afterwards), resets the generation to 0 and reconnects with backoff;
-// a new link is a new generation, bound again by the welcome. Only started when the mod's setting
-// [command] enabled is true; with it false this object is never constructed.
+// The native end of the command link (M5-B, glacier-relay ADR 0009; M5 C-2B versions): a second
+// outbound TCP client, separate from the telemetry sink, to BEAM's command listener on loopback.
+// Native still never listens. One network thread owns the socket: it connects with a timeout and
+// backoff, sends the hello, waits for the welcome and binds every later command to the welcome's
+// link generation, reads command lines (at most 4,096 bytes), decodes them strictly, deduplicates
+// and queues them, answers "received" (or busy / duplicate / rejected) itself, and writes the
+// results the frame scheduler produced. It never reads or writes engine state. A lost connection
+// clears the queue (nothing pending is applied afterwards), resets the generation to 0 and
+// reconnects with backoff; a new link is a new generation, bound again by the welcome.
+//
+// Versions (M5 C-2B): with no run token configured the link speaks version 1 exactly as C-1 did.
+// With a token it speaks version 2: its hello says so, the welcome must be version 2 with a
+// nonce, and it answers once with an attest whose MAC covers that nonce, that generation and its
+// own adapter id (Attestation::AttestMac). BEAM gives the attest no reply line: a failed
+// attestation shows as BEAM closing the link, after which the link reconnects with backoff and
+// attests afresh over the new welcome's nonce — never with an earlier link's attestation, never
+// falling back to version 1 on the same or a later link. The token and the MAC are never logged.
+//
+// The effectful setting ([command] effectful, false by default) is separate: only with it on does
+// the hello advertise player.outfit.set/2 and the decoder accept that entry; a second effectful
+// command while one is queued is answered busy. Only started when the mod's setting [command]
+// enabled is true; with it false this object is never constructed.
 class CommandLink
 {
 public:
@@ -33,6 +45,8 @@ public:
         uint32_t welcome_timeout_ms = 2000;
         uint32_t backoff_initial_ms = 1000;
         uint32_t backoff_max_ms = 30000;
+        bool effectful = false; // [command] effectful: advertise and decode player.outfit.set/2
+        std::string token;      // [command] token: 64 lowercase hex characters → protocol version 2; empty → version 1
     };
 
     struct Stats
@@ -40,10 +54,13 @@ public:
         bool connected = false;
         bool welcomed = false;
         uint64_t link_generation = 0;
+        uint32_t protocol_version = 1;   // the version this link speaks (fixed at construction)
+        bool effectful = false;
         uint64_t connect_attempts = 0;
         uint64_t connects = 0;
         uint64_t disconnects = 0;
         uint64_t refusals = 0;           // BEAM answered "refused" (another link was up)
+        uint64_t attests_sent = 0;       // version 2: one per welcome
         uint64_t lines_received = 0;
         uint64_t commands_queued = 0;
         uint64_t commands_busy = 0;
@@ -73,6 +90,9 @@ public:
     // The generation the current link holds (0 while not welcomed). Readable from any thread.
     uint64_t LinkGeneration() const;
 
+    // The version this link speaks (1 or 2), fixed at construction.
+    uint32_t ProtocolVersion() const { return m_Version; }
+
     Stats GetStats() const;
 
 private:
@@ -92,6 +112,7 @@ private:
     CommandQueue& m_Queue;
     std::string m_AdapterInstanceId;
     Clock m_Clock;
+    uint32_t m_Version = 1;
 
     mutable std::mutex m_Mutex;
     std::condition_variable m_Wake;

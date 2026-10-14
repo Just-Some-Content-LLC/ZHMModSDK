@@ -13,6 +13,7 @@
 #include "CommandScheduler.h"
 #include "LifecycleTee.h"
 #include "MissionObserver.h"
+#include "OutfitApplier.h"
 #include "RelayAdapter.h"
 #include "SceneState.h"
 #include "TelemetryNormalizer.h"
@@ -36,9 +37,16 @@ class ZDynamicObject;
 // Command link (M5-B, ADR 0009): optional and off by default ([command] enabled = false in
 // glacierrelay.ini). When enabled, a second outbound loopback client (CommandLink, its own
 // network thread, never a listener) receives allowlisted commands from BEAM; the frame update
-// schedules at most one per frame through CommandScheduler. The only executable entry is
-// relay.probe, which writes nothing and reports what the frame observed. The telemetry sink and
-// the detour are untouched by it; when disabled none of it is constructed.
+// schedules at most one per frame through CommandScheduler. relay.probe and relay.inspect.outfit
+// write nothing. The telemetry sink and the detour are untouched by it; when disabled none of it
+// is constructed.
+//
+// Effectful path (M5 C-2B): a second, separate setting, [command] effectful = false by default.
+// Only with it true is the outfit applier constructed, player.outfit.set/2 advertised and
+// decodable, and the one approved engine mutation (Functions::ZHitman5_SetOutfit, in
+// OutfitApplier.cpp) reachable — behind the gate of OutfitApply on the applying frame. A run token
+// ([command] token, 64 lowercase hex, never logged) makes the link speak protocol version 2 and
+// attest; without it the link is version 1 exactly as C-1.
 class GlacierRelay : public IPluginInterface
 {
 public:
@@ -113,6 +121,7 @@ private:
     std::unique_ptr<CommandQueue> m_CommandQueue;
     std::unique_ptr<CommandLink> m_CommandLink;
     std::unique_ptr<CommandScheduler> m_CommandScheduler;
+    std::unique_ptr<EngineOutfitApplier> m_OutfitApplier; // M5 C-2B; null unless [command] effectful = true
 
     // M5 C-1 transition instrumentation (only maintained when the command link is enabled; the
     // tee is owned by the adapter's sink chain and this is a non-owning view for its stats).

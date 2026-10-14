@@ -1,6 +1,7 @@
 #pragma once
 
 #include <excpt.h>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -56,6 +57,11 @@ namespace RelayLog
 
     // SEH filter for Guard. Logs the exception and always returns EXCEPTION_CONTINUE_SEARCH.
     int LogFault(const char* p_Where, _EXCEPTION_POINTERS* p_Info);
+
+    // M5 C-2B: how many faults the filter has seen in this process (any guard, any thread). The
+    // effectful outfit path refuses to run once this is non-zero: a process that survived a fault
+    // (an outer handler resumed it) is not a process this adapter will ask for an engine write.
+    uint32_t FaultsLogged();
 
     // Runs p_Func. If a structured exception (access violation, C++ exception, ...) escapes it, the
     // fault is logged and then keeps propagating exactly as it would have without the guard.

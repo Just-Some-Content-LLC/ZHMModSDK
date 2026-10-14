@@ -35,9 +35,38 @@ namespace PreconditionEvaluator
             case Reason::CandidateNotHeroAUsable: return "candidate_not_heroa_usable";
             case Reason::ExpectCurrentMismatch: return "expect_current_mismatch";
             case Reason::SetterUnavailable: return "setter_unavailable";
+            case Reason::CurrentTupleUnreadable: return "current_tuple_unreadable";
+            case Reason::ExpectCurrentTupleMismatch: return "expect_current_tuple_mismatch";
+            case Reason::TargetEqualsCurrent: return "target_equals_current";
+            case Reason::TargetCharsetOutOfBounds: return "target_charset_out_of_bounds";
+            case Reason::TargetHeroACollectionInvalid: return "target_heroa_collection_invalid";
+            case Reason::TargetVariationOutOfBounds: return "target_variation_out_of_bounds";
+            case Reason::LinkGenerationChanged: return "link_generation_changed";
+            case Reason::ThreadMismatch: return "thread_mismatch";
+            case Reason::EffectfulLatched: return "effectful_latched";
         }
 
         return "unknown";
+    }
+
+    bool IsUnavailability(Reason p_Reason)
+    {
+        switch (p_Reason)
+        {
+            case Reason::FreshGenerationUnavailable:
+            case Reason::FreshGenerationInconsistent:
+            case Reason::SceneUnavailable:
+            case Reason::PlayerUnavailable:
+            case Reason::OutfitUnreadable:
+            case Reason::CurrentTupleUnreadable:
+            case Reason::SetterUnavailable:
+            case Reason::LinkGenerationChanged:
+            case Reason::ThreadMismatch:
+            case Reason::EffectfulLatched:
+                return true;
+            default:
+                return false;
+        }
     }
 
     Verdict Evaluate(const Input& p_Input, const Rules& p_Rules)
@@ -127,7 +156,8 @@ namespace PreconditionEvaluator
         if (!(p_Input.hero_heroa_valid.observed() && *p_Input.hero_heroa_valid.value))
             s_Fail(Reason::HeroAInvalid);
 
-        // 7. The candidate kit, HeroA-usable.
+        // 7. The candidate kit: HeroA-usable at charset 0 for the hypothetical rule (C-1); for an
+        //    effectful request the requested charset and variation are bounds-checked instead.
         if (!p_Input.candidate)
         {
             s_Fail(Reason::CandidateMissing);
@@ -136,12 +166,28 @@ namespace PreconditionEvaluator
         {
             const auto& s_Candidate = *p_Input.candidate;
             if (!(s_Candidate.found.observed() && *s_Candidate.found.value))
+            {
                 s_Fail(Reason::CandidateUnresolved);
-            else if (!(s_Candidate.heroa_usable.observed() && *s_Candidate.heroa_usable.value))
-                s_Fail(Reason::CandidateNotHeroAUsable);
+            }
+            else if (!p_Input.target)
+            {
+                if (!(s_Candidate.heroa_usable.observed() && *s_Candidate.heroa_usable.value))
+                    s_Fail(Reason::CandidateNotHeroAUsable);
+            }
+            else
+            {
+                const int32_t s_Charset = p_Input.target->charset;
+                const auto& s_Counts = s_Candidate.charset_heroa_variations;
+                if (s_Charset < 0 || static_cast<size_t>(s_Charset) >= s_Counts.size())
+                    s_Fail(Reason::TargetCharsetOutOfBounds);
+                else if (!s_Counts[static_cast<size_t>(s_Charset)].observed())
+                    s_Fail(Reason::TargetHeroACollectionInvalid);
+                else if (p_Input.target->variation < 0 || static_cast<int64_t>(p_Input.target->variation) >= *s_Counts[static_cast<size_t>(s_Charset)].value)
+                    s_Fail(Reason::TargetVariationOutOfBounds);
+            }
         }
 
-        // 8. The optional expected-current outfit id.
+        // 8. The optional expected-current outfit id (C-1).
         if (p_Input.expect_current)
         {
             if (!p_Input.hero_outfit_id.observed() || *p_Input.hero_outfit_id.value != *p_Input.expect_current)
@@ -151,6 +197,42 @@ namespace PreconditionEvaluator
         // 9. The setter must exist on this build.
         if (!(p_Input.set_outfit_available.observed() && *p_Input.set_outfit_available.value))
             s_Fail(Reason::SetterUnavailable);
+
+        // 10. M5 C-2B, for an effectful request only: the complete current tuple readable, the
+        //     mandatory expected-current tuple equal to it, the target different from it, the link
+        //     and the thread unchanged, the path not latched.
+        if (p_Input.target)
+        {
+            const bool s_TupleReadable = p_Input.hero_outfit_id.observed() && p_Input.hero_charset.observed() && p_Input.hero_variation.observed();
+
+            if (!s_TupleReadable)
+                s_Fail(Reason::CurrentTupleUnreadable);
+
+            if (!p_Input.expect_current_tuple)
+            {
+                s_Fail(Reason::ExpectCurrentTupleMismatch);
+            }
+            else if (s_TupleReadable)
+            {
+                const auto& s_Expect = *p_Input.expect_current_tuple;
+                if (*p_Input.hero_outfit_id.value != s_Expect.outfit_id || *p_Input.hero_charset.value != s_Expect.charset || *p_Input.hero_variation.value != s_Expect.variation)
+                    s_Fail(Reason::ExpectCurrentTupleMismatch);
+            }
+
+            if (s_TupleReadable)
+            {
+                const auto& s_Target = *p_Input.target;
+                if (*p_Input.hero_outfit_id.value == s_Target.outfit_id && *p_Input.hero_charset.value == s_Target.charset && *p_Input.hero_variation.value == s_Target.variation)
+                    s_Fail(Reason::TargetEqualsCurrent);
+            }
+
+            if (!p_Input.link_generation_unchanged)
+                s_Fail(Reason::LinkGenerationChanged);
+            if (!p_Input.on_expected_thread)
+                s_Fail(Reason::ThreadMismatch);
+            if (p_Input.effectful_latched)
+                s_Fail(Reason::EffectfulLatched);
+        }
 
         s_Verdict.ok = s_Verdict.reasons.empty();
         return s_Verdict;

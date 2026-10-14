@@ -123,6 +123,17 @@ void GlacierRelay::OnEngineInitialized()
         else
             RelayLog::Warn("command port setting {} is out of range; using {}", s_CommandPort, s_Command.port);
 
+        // M5 C-2B: the effectful setting and the run token, both separate from [command] enabled.
+        //   [command] effectful = false (default)  the outfit applier is not constructed; player.outfit.set/2
+        //                                          is neither advertised nor decodable
+        //   [command] token = <64 lowercase hex>   protocol version 2 with attestation; never logged
+        s_Command.effectful = GetSettingBool("command", "effectful", false);
+        const ZString s_Token = GetSetting("command", "token", "");
+        s_Command.token = std::string(s_Token.ToStringView());
+
+        if (s_Command.effectful)
+            m_OutfitApplier = std::make_unique<EngineOutfitApplier>();
+
         m_CommandQueue = std::make_unique<CommandQueue>();
         m_CommandLink = std::make_unique<CommandLink>(s_Command, *m_CommandQueue, m_Adapter->InstanceId(), [] {
             return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -132,7 +143,10 @@ void GlacierRelay::OnEngineInitialized()
             m_CommandLink->PushResult(p_Result);
         });
 
-        RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1 and relay.inspect.outfit/1 (read-only), one command per frame, no engine write", s_Command.port);
+        if (s_Command.effectful)
+            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1 (read-only) and player.outfit.set/2 (EFFECTFUL: one guarded ZHitman5_SetOutfit call behind the applying-frame gate), one command per frame; protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
+        else
+            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1 and relay.inspect.outfit/1 (read-only), one command per frame, no engine write ([command] effectful = false); protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
     }
     else
     {
@@ -309,6 +323,11 @@ void GlacierRelay::ScheduleCommand(const SceneState& p_Scene, bool p_PlayingBefo
     s_Observation.contract_started_seen = m_ContractStartedSeen;
     s_Observation.contract_ended_seen = m_ContractEndedSeen;
     s_Observation.inspector = [this](const std::optional<std::string>& p_CandidateId) { return InspectOutfit(p_CandidateId); };
+
+    // M5 C-2B: the applier only when the effectful setting constructed it; the link generation
+    // re-read immediately before any setter call.
+    s_Observation.applier = m_OutfitApplier.get();
+    s_Observation.link_generation_now = [this] { return m_CommandLink->LinkGeneration(); };
 
     if (!m_CommandThreadLogged)
     {

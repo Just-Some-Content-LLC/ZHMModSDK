@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 
+#include "Attestation.h"
 #include "RelayLog.h"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -37,6 +38,19 @@ CommandLink::CommandLink(Options p_Options, CommandQueue& p_Queue, std::string p
     m_AdapterInstanceId(std::move(p_AdapterInstanceId)),
     m_Clock(std::move(p_Clock))
 {
+    // The version is fixed by the token's presence: a valid token means version 2 with the
+    // attestation exchange; no token (or an invalid one, which is treated as absent and never
+    // echoed) means version 1 exactly as C-1 spoke it.
+    if (!m_Options.token.empty() && !Attestation::ValidToken(m_Options.token))
+    {
+        RelayLog::Warn("command link: the configured token is not 64 lowercase hex characters; ignored (protocol version 1, no attestation)");
+        m_Options.token.clear();
+    }
+
+    m_Version = m_Options.token.empty() ? static_cast<uint32_t>(CommandProtocol::k_ProtocolVersion) : static_cast<uint32_t>(CommandProtocol::k_ProtocolVersion2);
+    m_Stats.protocol_version = m_Version;
+    m_Stats.effectful = m_Options.effectful;
+
     WSADATA s_Data;
 
     if (WSAStartup(MAKEWORD(2, 2), &s_Data) != 0)
@@ -49,9 +63,10 @@ CommandLink::CommandLink(Options p_Options, CommandQueue& p_Queue, std::string p
     m_Thread = std::thread([this] { Loop(); });
 
     RelayLog::Info(
-        "command link: client to {}:{} (connect timeout {} ms, welcome timeout {} ms, backoff {}..{} ms, queue {}, dedup window {})",
+        "command link: client to {}:{} (connect timeout {} ms, welcome timeout {} ms, backoff {}..{} ms, queue {}, dedup window {}); protocol version {} ({}); effectful {}",
         m_Options.host, m_Options.port, m_Options.connect_timeout_ms, m_Options.welcome_timeout_ms,
-        m_Options.backoff_initial_ms, m_Options.backoff_max_ms, CommandQueue::k_Capacity, CommandQueue::k_DedupWindow
+        m_Options.backoff_initial_ms, m_Options.backoff_max_ms, CommandQueue::k_Capacity, CommandQueue::k_DedupWindow,
+        m_Version, m_Version == 2 ? "run token present; attestation on every welcome" : "no run token; no attestation", m_Options.effectful ? "enabled" : "disabled"
     );
 }
 
@@ -73,9 +88,12 @@ CommandLink::~CommandLink()
 
 void CommandLink::PushResult(const Result& p_Result)
 {
+    Result s_Result = p_Result;
+    s_Result.protocol_version = m_Version;
+
     {
         std::lock_guard s_Lock(m_Mutex);
-        m_Outgoing.push_back(CommandProtocol::EncodeResult(p_Result));
+        m_Outgoing.push_back(CommandProtocol::EncodeResult(s_Result));
     }
 
     m_Wake.notify_one();
@@ -245,9 +263,12 @@ bool CommandLink::Connect()
 bool CommandLink::Handshake()
 {
     CommandProtocol::Hello s_Hello;
+    s_Hello.protocol_version = m_Version;
     s_Hello.adapter_instance_id = m_AdapterInstanceId;
     s_Hello.native_at = UtcNowText();
     s_Hello.capabilities = {"relay.probe/1", "relay.inspect.outfit/1"};
+    if (m_Options.effectful)
+        s_Hello.capabilities.push_back("player.outfit.set/2");
 
     {
         std::lock_guard s_Lock(m_Mutex);
@@ -310,10 +331,33 @@ bool CommandLink::Handshake()
         }
 
         CommandProtocol::Welcome s_Welcome;
-        if (!CommandProtocol::DecodeWelcome(s_Line, s_Welcome, s_Reason))
+        if (!CommandProtocol::DecodeWelcome(s_Line, m_Version, s_Welcome, s_Reason))
         {
+            // A welcome of the other version is a mismatch, never a downgrade or an upgrade: the
+            // handshake fails and the link retries with backoff, still at its own version.
             RelayLog::Warn("command link: invalid welcome ({})", s_Reason);
             return false;
+        }
+
+        // Version 2: exactly one attest over this welcome's nonce and generation, before anything
+        // else. BEAM answers it with silence (success) or by closing the link (failure). The MAC and
+        // the token are never logged.
+        if (m_Version == static_cast<uint32_t>(CommandProtocol::k_ProtocolVersion2))
+        {
+            CommandProtocol::Attest s_Attest;
+            s_Attest.link_generation = s_Welcome.link_generation;
+            s_Attest.adapter_instance_id = m_AdapterInstanceId;
+            s_Attest.mac = Attestation::AttestMac(m_Options.token, s_Welcome.nonce, s_Welcome.link_generation, m_AdapterInstanceId);
+
+            if (!SendLine(CommandProtocol::EncodeAttest(s_Attest)))
+                return false;
+
+            {
+                std::lock_guard s_Lock(m_Mutex);
+                ++m_Stats.attests_sent;
+            }
+
+            RelayLog::Info("command link: attest sent for link generation {} (token present; nonce and MAC not logged)", s_Welcome.link_generation);
         }
 
         {
@@ -322,7 +366,7 @@ bool CommandLink::Handshake()
             m_Stats.link_generation = s_Welcome.link_generation;
         }
 
-        RelayLog::Info("command link: welcomed by {}; link generation {}; {} allowlisted entr(y/ies)", s_Welcome.node, s_Welcome.link_generation, s_Welcome.allowlist.size());
+        RelayLog::Info("command link: welcomed by {} (protocol version {}); link generation {}; {} allowlisted entr(y/ies)", s_Welcome.node, s_Welcome.protocol_version, s_Welcome.link_generation, s_Welcome.allowlist.size());
         return true;
     }
 
@@ -439,8 +483,10 @@ bool CommandLink::ReadLines(uint32_t p_WaitMs)
 
 void CommandLink::Answer(const Result& p_Result)
 {
+    Result s_Result = p_Result;
+    s_Result.protocol_version = m_Version;
     std::lock_guard s_Lock(m_Mutex);
-    m_Outgoing.push_back(CommandProtocol::EncodeResult(p_Result));
+    m_Outgoing.push_back(CommandProtocol::EncodeResult(s_Result));
 }
 
 // One line from BEAM after the welcome. Only commands are expected here; anything else is a
@@ -455,7 +501,10 @@ void CommandLink::HandleLine(std::string_view p_Line)
         s_Generation = m_Stats.link_generation;
     }
 
-    const auto s_Decoded = CommandProtocol::DecodeCommand(p_Line);
+    CommandProtocol::DecodeOptions s_Options;
+    s_Options.protocol_version = m_Version;
+    s_Options.effectful = m_Options.effectful;
+    const auto s_Decoded = CommandProtocol::DecodeCommand(p_Line, s_Options);
 
     Result s_Result;
     s_Result.command_id = s_Decoded.command_id;
@@ -500,6 +549,21 @@ void CommandLink::HandleLine(std::string_view p_Line)
 
         s_Result.status = Status::Rejected;
         s_Result.reason = "link generation mismatch (command " + std::to_string(s_Command.link_generation) + ", link " + std::to_string(s_Generation) + ")";
+        Answer(s_Result);
+        return;
+    }
+
+    // M5 C-2B: one effectful command at a time on the native side as well (the authority keeps
+    // one in flight); a second one while one is queued is busy, never silently dropped.
+    if (CommandProtocol::IsEffectful(s_Command.entry) && m_Queue.HasPendingEffectful())
+    {
+        {
+            std::lock_guard s_Lock(m_Mutex);
+            ++m_Stats.commands_busy;
+        }
+
+        s_Result.status = Status::Busy;
+        s_Result.reason = "an effectful command is already queued";
         Answer(s_Result);
         return;
     }

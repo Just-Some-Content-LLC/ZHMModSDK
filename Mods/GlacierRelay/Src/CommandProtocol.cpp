@@ -2,6 +2,7 @@
 
 #include <fmt/format.h>
 
+#include "Attestation.h"
 #include "CommandJson.h"
 #include "Json.h"
 
@@ -47,7 +48,14 @@ namespace CommandProtocol
             return Entry::RelayInspectOutfit1;
         if (p_Name == "player.outfit.set" && p_Version == 1)
             return Entry::PlayerOutfitSet1Reserved;
+        if (p_Name == "player.outfit.set" && p_Version == 2)
+            return Entry::PlayerOutfitSet2;
         return Entry::Unknown;
+    }
+
+    bool IsEffectful(Entry p_Entry)
+    {
+        return p_Entry == Entry::PlayerOutfitSet2;
     }
 
     bool ValidUuid(std::string_view p_Text)
@@ -94,6 +102,14 @@ namespace CommandProtocol
             return true;
         }
 
+        bool IsBoundedInt(const Value* p_Value, int32_t p_Min, int32_t p_Max, int32_t& p_Out)
+        {
+            if (!p_Value || p_Value->kind != Value::Kind::Number || !p_Value->is_integer || p_Value->integer < p_Min || p_Value->integer > p_Max)
+                return false;
+            p_Out = static_cast<int32_t>(p_Value->integer);
+            return true;
+        }
+
         bool KnownKeys(const Value& p_Object, std::initializer_list<const char*> p_Allowed, std::string& p_Unknown)
         {
             for (const auto& s_Field : p_Object.fields)
@@ -131,9 +147,53 @@ namespace CommandProtocol
                 --s_Cut;
             return std::string(p_Text.substr(0, s_Cut));
         }
+
+        // An outfit tuple object with exactly the three fields, each within its bounds.
+        bool ReadTuple(const Value& p_Object, OutfitTuple& p_Out, std::string& p_Reason)
+        {
+            if (p_Object.kind != Value::Kind::Object)
+            {
+                p_Reason = "not an object";
+                return false;
+            }
+
+            std::string s_Unknown;
+            if (!KnownKeys(p_Object, {"disguise_repository_id", "charset", "variation"}, s_Unknown))
+            {
+                p_Reason = "unknown field " + s_Unknown;
+                return false;
+            }
+
+            const Value* s_Id = p_Object.Find("disguise_repository_id");
+            if (!IsText(s_Id, 36) || !ValidUuid(s_Id->text))
+            {
+                p_Reason = "disguise_repository_id missing or not a uuid";
+                return false;
+            }
+
+            if (!IsBoundedInt(p_Object.Find("charset"), 0, k_MaxCharset, p_Out.charset))
+            {
+                p_Reason = "charset missing or out of 0..15";
+                return false;
+            }
+
+            if (!IsBoundedInt(p_Object.Find("variation"), 0, k_MaxVariation, p_Out.variation))
+            {
+                p_Reason = "variation missing or out of 0..63";
+                return false;
+            }
+
+            p_Out.outfit_id = s_Id->text;
+            return true;
+        }
     }
 
     DecodedCommand DecodeCommand(std::string_view p_Line)
+    {
+        return DecodeCommand(p_Line, DecodeOptions{});
+    }
+
+    DecodedCommand DecodeCommand(std::string_view p_Line, const DecodeOptions& p_Options)
     {
         DecodedCommand s_Out;
 
@@ -150,8 +210,10 @@ namespace CommandProtocol
         if (s_Root.kind != Value::Kind::Object)
             return Reject(s_Out, "not an object");
 
+        // The negotiated version is pinned for the link's life: a line of another version is a
+        // violation (no identity is kept for it, so the link closes), never a downgrade.
         uint64_t s_Version = 0;
-        if (!IsUnsigned(s_Root.Find("command_protocol_version"), s_Version) || s_Version != static_cast<uint64_t>(k_ProtocolVersion))
+        if (!IsUnsigned(s_Root.Find("command_protocol_version"), s_Version) || s_Version != static_cast<uint64_t>(p_Options.protocol_version))
             return Reject(s_Out, "unsupported protocol version");
 
         const Value* s_Kind = s_Root.Find("kind");
@@ -211,7 +273,7 @@ namespace CommandProtocol
         {
             if (s_Field.first != "mission_generation")
                 return Reject(s_Out, "unknown precondition: " + s_Field.first);
-            if (!IsText(&s_Field.second, k_MaxMissionGenerationBytes))
+            if (!IsText(&s_Field.second, k_MaxMissionGenerationBytes) || s_Field.second.text.empty())
                 return Reject(s_Out, "invalid precondition mission_generation");
             s_Command.mission_generation_precondition = s_Field.second.text;
         }
@@ -251,6 +313,49 @@ namespace CommandProtocol
                 return Reject(s_Out, "reserved command: not issuable");
             }
 
+            case Entry::PlayerOutfitSet2:
+            {
+                // M5 C-2B: the complete tuple, exactly these parameters, the mandatory
+                // expected-current tuple and the mandatory mission_generation precondition; the
+                // same tuple as the current one is refused as a no-op; and none of it unless the
+                // effectful setting is on (otherwise rejected exactly like the reserved entry).
+                if (!p_Options.effectful)
+                    return Reject(s_Out, "effectful setting disabled: player.outfit.set/2 not executable");
+
+                if (!KnownKeys(*s_Params, {"disguise_repository_id", "charset", "variation", "expect_current"}, s_Unknown))
+                    return Reject(s_Out, "unknown parameter: " + s_Unknown);
+
+                OutfitTuple s_Target;
+                std::string s_Why;
+                const Value* s_IdValue = s_Params->Find("disguise_repository_id");
+                if (!IsText(s_IdValue, 36) || !ValidUuid(s_IdValue->text))
+                    return Reject(s_Out, "invalid parameter: disguise_repository_id (missing or not a uuid)");
+                if (!IsBoundedInt(s_Params->Find("charset"), 0, k_MaxCharset, s_Target.charset))
+                    return Reject(s_Out, "invalid parameter: charset (missing or out of 0..15)");
+                if (!IsBoundedInt(s_Params->Find("variation"), 0, k_MaxVariation, s_Target.variation))
+                    return Reject(s_Out, "invalid parameter: variation (missing or out of 0..63)");
+                s_Target.outfit_id = s_IdValue->text;
+
+                const Value* s_Expect = s_Params->Find("expect_current");
+                if (!s_Expect)
+                    return Reject(s_Out, "missing parameter: expect_current");
+
+                OutfitTuple s_Current;
+                if (!ReadTuple(*s_Expect, s_Current, s_Why))
+                    return Reject(s_Out, "invalid parameter: expect_current (" + s_Why + ")");
+
+                if (!s_Command.mission_generation_precondition)
+                    return Reject(s_Out, "missing precondition: mission_generation");
+
+                if (s_Target == s_Current)
+                    return Reject(s_Out, "target equals expect_current: a no-op is not an effectful command");
+
+                s_Command.outfit_target = s_Target;
+                s_Command.outfit_expect_current = s_Current;
+                s_Command.params.emplace_back("disguise_repository_id", s_Target.outfit_id);
+                break;
+            }
+
             case Entry::Unknown:
                 return Reject(s_Out, "unknown command: " + s_Command.name + "/" + std::to_string(s_Command.version));
         }
@@ -260,6 +365,11 @@ namespace CommandProtocol
     }
 
     bool DecodeWelcome(std::string_view p_Line, Welcome& p_Out, std::string& p_Reason)
+    {
+        return DecodeWelcome(p_Line, k_ProtocolVersion, p_Out, p_Reason);
+    }
+
+    bool DecodeWelcome(std::string_view p_Line, uint32_t p_ExpectedVersion, Welcome& p_Out, std::string& p_Reason)
     {
         if (p_Line.size() > k_MaxLineBytes)
         {
@@ -277,9 +387,9 @@ namespace CommandProtocol
         const Value& s_Root = s_Parsed.value;
         uint64_t s_Version = 0;
 
-        if (s_Root.kind != Value::Kind::Object || !IsUnsigned(s_Root.Find("command_protocol_version"), s_Version) || s_Version != static_cast<uint64_t>(k_ProtocolVersion))
+        if (s_Root.kind != Value::Kind::Object || !IsUnsigned(s_Root.Find("command_protocol_version"), s_Version) || s_Version != static_cast<uint64_t>(p_ExpectedVersion))
         {
-            p_Reason = "unsupported protocol version";
+            p_Reason = "protocol version mismatch (expected " + std::to_string(p_ExpectedVersion) + ")";
             return false;
         }
 
@@ -291,7 +401,10 @@ namespace CommandProtocol
         }
 
         std::string s_Unknown;
-        if (!KnownKeys(s_Root, {"command_protocol_version", "kind", "link_generation", "node", "allowlist"}, s_Unknown))
+        const bool s_Known = p_ExpectedVersion == k_ProtocolVersion2
+            ? KnownKeys(s_Root, {"command_protocol_version", "kind", "link_generation", "node", "allowlist", "nonce", "attest_required"}, s_Unknown)
+            : KnownKeys(s_Root, {"command_protocol_version", "kind", "link_generation", "node", "allowlist"}, s_Unknown);
+        if (!s_Known)
         {
             p_Reason = "unknown field: " + s_Unknown;
             return false;
@@ -318,9 +431,12 @@ namespace CommandProtocol
             return false;
         }
 
+        p_Out.protocol_version = p_ExpectedVersion;
         p_Out.link_generation = s_Generation;
         p_Out.node = s_Node->text;
         p_Out.allowlist.clear();
+        p_Out.nonce.clear();
+        p_Out.attest_required = false;
 
         for (const auto& s_Item : s_Allowlist->items)
         {
@@ -332,6 +448,26 @@ namespace CommandProtocol
                 return false;
             }
             p_Out.allowlist.emplace_back(s_Name->text, static_cast<uint32_t>(s_EntryVersion));
+        }
+
+        if (p_ExpectedVersion == k_ProtocolVersion2)
+        {
+            const Value* s_Nonce = s_Root.Find("nonce");
+            if (!IsText(s_Nonce, 32) || !Attestation::ValidNonce(s_Nonce->text))
+            {
+                p_Reason = "invalid nonce";
+                return false;
+            }
+
+            const Value* s_Required = s_Root.Find("attest_required");
+            if (!s_Required || s_Required->kind != Value::Kind::Bool || !s_Required->boolean)
+            {
+                p_Reason = "attest_required missing or false";
+                return false;
+            }
+
+            p_Out.nonce = s_Nonce->text;
+            p_Out.attest_required = true;
         }
 
         return true;
@@ -374,9 +510,17 @@ namespace CommandProtocol
 
         return fmt::format(
             "{{\"command_protocol_version\":{},\"kind\":\"hello\",\"adapter_instance_id\":{},\"native_at\":{},\"mission_generation\":{},\"capabilities\":{}}}\n",
-            k_ProtocolVersion, Json::Quote(p_Hello.adapter_instance_id), Json::Quote(Truncate(p_Hello.native_at, 64)),
+            p_Hello.protocol_version, Json::Quote(p_Hello.adapter_instance_id), Json::Quote(Truncate(p_Hello.native_at, 64)),
             p_Hello.mission_generation ? Json::Quote(Truncate(*p_Hello.mission_generation, k_MaxMissionGenerationBytes)) : "null",
             s_Capabilities
+        );
+    }
+
+    std::string EncodeAttest(const Attest& p_Attest)
+    {
+        return fmt::format(
+            "{{\"command_protocol_version\":{},\"kind\":\"attest\",\"link_generation\":{},\"adapter_instance_id\":{},\"mac\":{}}}\n",
+            k_ProtocolVersion2, p_Attest.link_generation, Json::Quote(p_Attest.adapter_instance_id), Json::Quote(Truncate(p_Attest.mac, 64))
         );
     }
 
@@ -450,7 +594,7 @@ namespace CommandProtocol
 
         return fmt::format(
             "{{\"command_protocol_version\":{},\"kind\":\"command.result\",\"command_id\":{},\"link_generation\":{},\"adapter_instance_id\":{},\"status\":\"{}\",\"reason\":{},\"native_at\":{},\"frame\":{},\"observed\":{},\"mission_generation\":{}}}\n",
-            k_ProtocolVersion, Json::Quote(p_Result.command_id), p_Result.link_generation,
+            p_Result.protocol_version, Json::Quote(p_Result.command_id), p_Result.link_generation,
             p_Result.adapter_instance_id.empty() ? "null" : Json::Quote(p_Result.adapter_instance_id),
             StatusText(p_Result.status),
             p_Result.reason.empty() ? "null" : Json::Quote(Truncate(p_Result.reason, k_MaxReasonBytes)),

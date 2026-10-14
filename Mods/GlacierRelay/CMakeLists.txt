@@ -9,6 +9,8 @@ cmake_minimum_required(VERSION 3.12)
 #   enforces the boundary.
 
 set(RELAY_ENGINE_INDEPENDENT_SOURCES
+        Src/Attestation.cpp
+        Src/Attestation.h
         Src/CommandJson.cpp
         Src/CommandJson.h
         Src/CommandLink.cpp
@@ -18,6 +20,7 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/CommandQueue.h
         Src/CommandScheduler.cpp
         Src/CommandScheduler.h
+        Src/IOutfitApplier.h
         Src/IRelaySink.h
         Src/Json.cpp
         Src/Json.h
@@ -27,6 +30,8 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/LogRelaySink.h
         Src/MissionObserver.cpp
         Src/MissionObserver.h
+        Src/OutfitApply.cpp
+        Src/OutfitApply.h
         Src/OutfitObservation.cpp
         Src/OutfitObservation.h
         Src/PreconditionEvaluator.cpp
@@ -54,6 +59,8 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
 set(RELAY_GLACIER_FACING_SOURCES
         Src/GlacierRelay.cpp
         Src/GlacierRelay.h
+        Src/OutfitApplier.cpp
+        Src/OutfitApplier.h
         Src/SceneObservation.cpp
         Src/SceneObservation.h
         Src/TelemetryIntake.cpp
@@ -80,10 +87,12 @@ find_package(fmt CONFIG REQUIRED)
 add_executable(GlacierRelayTests
         ${RELAY_ENGINE_INDEPENDENT_SOURCES}
         Tests/Main.cpp
+        Tests/AttestationTests.cpp
         Tests/CommandLinkTests.cpp
         Tests/CommandProtocolTests.cpp
         Tests/CommandQueueTests.cpp
         Tests/CommandSchedulerTests.cpp
+        Tests/OutfitApplyTests.cpp
         Tests/OutfitInspectionTests.cpp
         Tests/TestListener.h
         Tests/ContractLifecycleTests.cpp

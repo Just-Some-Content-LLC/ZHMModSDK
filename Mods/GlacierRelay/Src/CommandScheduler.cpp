@@ -1,5 +1,6 @@
 #include "CommandScheduler.h"
 
+#include "OutfitApply.h"
 #include "PreconditionEvaluator.h"
 #include "RelayLog.h"
 
@@ -301,6 +302,32 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
             return true;
         }
 
+        case CommandProtocol::Entry::PlayerOutfitSet2:
+        {
+            // M5 C-2B: the one effectful entry. Without an applier on this frame source (tests
+            // without one, the probe's inert modes) it is rejected, never applied.
+            ++m_Stats.outfit_dispatched;
+            m_Stats.last_executed_frame = p_Frame.frame;
+            m_Stats.last_latency_ms = s_Age;
+            if (s_Age > m_Stats.max_latency_ms)
+                m_Stats.max_latency_ms = s_Age;
+
+            if (!p_Frame.applier)
+            {
+                ++m_Stats.rejected;
+                s_Result.status = Status::Rejected;
+                s_Result.reason = "effectful entry not executable on this frame source (no outfit applier)";
+                m_Queue.MarkDone(s_Command.command_id, s_Pending->link_generation, Status::Rejected);
+                m_Emit(s_Result);
+                return true;
+            }
+
+            ApplyOutfit(*s_Pending, p_Frame, s_Result);
+            m_Queue.MarkDone(s_Command.command_id, s_Pending->link_generation, s_Result.status);
+            m_Emit(s_Result);
+            return true;
+        }
+
         case CommandProtocol::Entry::PlayerOutfitSet1Reserved:
         case CommandProtocol::Entry::Unknown:
         default:
@@ -312,4 +339,43 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
             m_Emit(s_Result);
             return true;
     }
+}
+
+// M5 C-2B: the apply context is this frame's observation as plain values plus the scheduler's
+// own thread expectation; OutfitApply drives the applier and classifies the outcome.
+void CommandScheduler::ApplyOutfit(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, Result& p_Result)
+{
+    OutfitApply::Context s_Context;
+    s_Context.pending = &p_Pending;
+    s_Context.frame = p_Frame.frame;
+    s_Context.now_mono_ms = p_Frame.now_mono_ms;
+    s_Context.thread_id = p_Frame.thread_id;
+    s_Context.expected_thread_id = m_Stats.first_thread_id;
+    s_Context.scene_available = p_Frame.scene_available;
+    s_Context.scene = p_Frame.scene;
+    s_Context.mission_playing = p_Frame.mission_playing;
+    s_Context.previous_frame_playing = p_Frame.previous_frame_playing;
+    s_Context.mission_generation = p_Frame.mission_generation;
+    s_Context.link_generation = p_Frame.link_generation;
+    s_Context.link_generation_now = p_Frame.link_generation_now;
+    s_Context.relay_transition_epoch = p_Frame.relay_transition_epoch;
+    s_Context.rise_frame = p_Frame.rise_frame;
+    s_Context.rise_mono_ms = p_Frame.rise_mono_ms;
+    s_Context.scene_resource_same_as_rise = p_Frame.scene_resource_same_as_rise;
+    s_Context.contract_started_seen = p_Frame.contract_started_seen;
+    s_Context.contract_ended_seen = p_Frame.contract_ended_seen;
+    s_Context.rules = m_Rules;
+
+    const auto s_Outcome = OutfitApply::Apply(s_Context, *p_Frame.applier, p_Result);
+
+    if (s_Outcome.invocation != OutfitApply::Invocation::NotCalled)
+        ++m_Stats.outfit_called;
+    if (s_Outcome.effect == OutfitApply::Effect::Changed)
+        ++m_Stats.outfit_changed;
+    if (s_Outcome.effect == OutfitApply::Effect::Uncertain)
+        ++m_Stats.outfit_uncertain;
+    if (p_Result.status == Status::PreconditionFailed || p_Result.status == Status::Unavailable)
+        ++m_Stats.outfit_not_applied;
+    if (s_Outcome.reduced)
+        ++m_Stats.reduced;
 }

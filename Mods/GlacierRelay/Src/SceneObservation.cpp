@@ -152,8 +152,11 @@ namespace
     }
 }
 
-OutfitObservation::EngineReads SceneObservation::ObserveOutfit(const std::optional<std::string>& p_CandidateId)
+OutfitObservation::EngineReads SceneObservation::ObserveOutfit(const std::optional<std::string>& p_CandidateId, OutfitHandles* p_Handles)
 {
+    if (p_Handles)
+        *p_Handles = OutfitHandles{};
+
     OutfitObservation::EngineReads s_Reads;
     s_Reads.thread_id = GetCurrentThreadId();
 
@@ -199,6 +202,8 @@ OutfitObservation::EngineReads SceneObservation::ObserveOutfit(const std::option
             {
                 s_Reads.hero.player_resolved = true;
                 ReadHeroOutfit(*s_Hero.m_pInterfaceRef, s_Reads.hero);
+                if (p_Handles)
+                    p_Handles->hero = s_Hero;
             }
         }
     }
@@ -242,9 +247,15 @@ OutfitObservation::EngineReads SceneObservation::ObserveOutfit(const std::option
                 s_Found = true;
 
                 if (!s_Pair.second || !s_Pair.second.m_pInterfaceRef)
+                {
                     s_Resolution.found = Field<bool>::Of(FieldStatus::Unavailable, "kit entry reference null");
+                }
                 else
+                {
                     DescribeKit(*s_Pair.second.m_pInterfaceRef, s_Resolution);
+                    if (p_Handles)
+                        p_Handles->kit = s_Pair.second;
+                }
                 break;
             }
 
