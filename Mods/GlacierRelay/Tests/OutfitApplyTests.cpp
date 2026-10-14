@@ -5,6 +5,8 @@
 // rejection; the result line bound. No engine pointer is constructed, valid or invalid.
 #include "TestHarness.h"
 
+#include <functional>
+
 #include <string>
 #include <vector>
 
@@ -594,5 +596,54 @@ void RunOutfitApplyTests()
         const size_t s_BadSize = EncodeResult(s_BadRun.result).size();
         CHECK(s_BadSize <= k_MaxLineBytes && s_BadRun.result.status == Status::Unavailable && s_Refused.invokes == 0);
         std::printf("OutfitApplyTests: fullest refused result encodes to %zu bytes (%zu fields)\n", s_BadSize, s_BadRun.result.observed.size());
+    }
+
+    // --- M5 design section 34 (A): the invocation evidence contract. Every result class carries an
+    //     OBSERVED boolean setter_called that agrees with the invocation field: false on a refusal,
+    //     an unavailability, a latched path and an unwritten applying line; true only when the fake
+    //     setter was invoked, including a faulting invocation (whose effect stays uncertain). The
+    //     field is on the reduction keep-list by construction (KeepWhenReduced).
+    {
+        struct Class { const char* label; bool invoked; const char* invocation; std::function<void(OutfitApply::Context&, CommandQueue::Pending&, FakeOutfit::Applier&)> arrange; };
+        const Class s_Classes[] = {
+            {"applied", true, "called", [](OutfitApply::Context&, CommandQueue::Pending&, FakeOutfit::Applier&) {}},
+            {"faulted", true, "faulted", [](OutfitApply::Context&, CommandQueue::Pending&, FakeOutfit::Applier& a) { a.world.mode = Mode::FaultDuringCall; }},
+            {"read-back missing", true, "called", [](OutfitApply::Context&, CommandQueue::Pending&, FakeOutfit::Applier& a) { a.world.mode = Mode::ReadBackUnavailable; }},
+            {"precondition refused", false, "not_called", [](OutfitApply::Context& c, CommandQueue::Pending&, FakeOutfit::Applier&) { c.rise_frame = 90; }},
+            {"scene unavailable", false, "not_called", [](OutfitApply::Context& c, CommandQueue::Pending&, FakeOutfit::Applier&) { c.scene_available = false; c.mission_playing = false; }},
+            {"player unavailable", false, "not_called", [](OutfitApply::Context&, CommandQueue::Pending&, FakeOutfit::Applier& a) { a.world.player_present = false; }},
+            {"expected-current mismatch", false, "not_called", [](OutfitApply::Context&, CommandQueue::Pending& p, FakeOutfit::Applier&) { p.command.outfit_expect_current = Tuple(k_Suit, 1, 0); }},
+            {"latched", false, "not_called", [](OutfitApply::Context&, CommandQueue::Pending&, FakeOutfit::Applier& a) { a.latched = true; }},
+            {"link changed at the call", false, "not_called", [](OutfitApply::Context& c, CommandQueue::Pending&, FakeOutfit::Applier&) { c.link_generation_now = [] { return uint64_t(2); }; }},
+        };
+
+        for (const auto& s_Class : s_Classes)
+        {
+            FakeOutfit::Applier s_Applier;
+            auto s_Pending = Pending(SetOutfit(CommandTest::Uuid(50)));
+            auto s_Context = PlayingContext(s_Pending);
+            s_Class.arrange(s_Context, s_Pending, s_Applier);
+            const auto s_Run = Apply(s_Context, s_Applier);
+            const bool s_Present = FieldIs(s_Run.result, "setter_called", FieldStatus::Observed);
+            const bool s_Agrees = BoolField(s_Run.result, "setter_called", s_Class.invoked) && TextField(s_Run.result, "invocation") == s_Class.invocation && (s_Applier.invokes == 1) == s_Class.invoked;
+            CHECK(s_Present && s_Agrees);
+            if (!(s_Present && s_Agrees))
+                std::printf("  contract '%s': setter_called present %d, invokes %d, invocation %s\n", s_Class.label, s_Present ? 1 : 0, s_Applier.invokes, TextField(s_Run.result, "invocation").c_str());
+            CHECK(EncodeResult(s_Run.result).size() <= k_MaxLineBytes);
+        }
+
+        // The applying line that was not accepted: setter_called false beside apply_log's category.
+        const auto s_Previous = RelayLog::SetRawWriterForTests(&ScriptedRawWrite);
+        CHECK(s_Previous == nullptr);
+        {
+            FakeOutfit::Applier s_Applier;
+            ResetLogScript(&s_Applier);
+            g_LogScript = LogScript{true, false, 0, 1784};
+            auto s_Pending = Pending(SetOutfit(CommandTest::Uuid(51)));
+            auto s_Context = PlayingContext(s_Pending);
+            const auto s_Run = Apply(s_Context, s_Applier);
+            CHECK(FieldIs(s_Run.result, "setter_called", FieldStatus::Observed) && BoolField(s_Run.result, "setter_called", false) && TextField(s_Run.result, "apply_log") == "write_failed" && TextField(s_Run.result, "invocation") == "not_called" && s_Applier.invokes == 0);
+        }
+        CHECK(RelayLog::SetRawWriterForTests(s_Previous) == &ScriptedRawWrite);
     }
 }

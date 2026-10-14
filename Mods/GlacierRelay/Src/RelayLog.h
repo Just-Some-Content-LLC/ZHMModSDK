@@ -78,7 +78,8 @@ namespace RelayLog
         WriteStatus status = WriteStatus::FileUnavailable;
         uint32_t requested = 0; // bytes of the line (prefix, message, newline)
         uint32_t written = 0;   // bytes WriteFile reported accepted
-        uint32_t error = 0;     // GetLastError after a failed WriteFile, else 0
+        uint32_t error = 0;     // GetLastError after a failed WriteFile, or of the failed open when
+                                // the file never opened (FileUnavailable); 0 when no code applies
     };
 
     // Writes one line like Write and reports how the write went. Ordinary diagnostics keep using

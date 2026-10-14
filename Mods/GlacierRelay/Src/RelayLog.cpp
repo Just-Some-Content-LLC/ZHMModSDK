@@ -10,6 +10,7 @@ namespace
 
     SRWLOCK g_Lock = SRWLOCK_INIT;
     HANDLE g_File = INVALID_HANDLE_VALUE;
+    DWORD g_OpenError = 0; // the last CreateFileW / directory failure, reported by FileWrite while the file is unavailable
     bool g_OpenAttempted = false;
     wchar_t g_Path[MAX_PATH] = {};
 
@@ -40,6 +41,7 @@ namespace
 
                 if (s_TempLen == 0 || s_TempLen >= MAX_PATH)
                 {
+                    g_OpenError = ERROR_PATH_NOT_FOUND;
                     OutputDebugStringA("[GlacierRelay] durable log unavailable: no LOCALAPPDATA or TEMP directory\n");
                     return;
                 }
@@ -84,8 +86,11 @@ namespace
 
         if (g_File == INVALID_HANDLE_VALUE)
         {
+            // Kept for every later checked write: a line that cannot be written because the file
+            // never opened reports this error, not an unexplained zero (M5 design section 34, A).
+            g_OpenError = GetLastError();
             char s_Message[128];
-            sprintf_s(s_Message, "[GlacierRelay] durable log unavailable: CreateFileW failed with error %lu\n", GetLastError());
+            sprintf_s(s_Message, "[GlacierRelay] durable log unavailable: CreateFileW failed with error %lu\n", g_OpenError);
             OutputDebugStringA(s_Message);
             return;
         }
@@ -101,7 +106,10 @@ namespace
         RelayLog::RawWrite s_Raw;
 
         if (g_File == INVALID_HANDLE_VALUE)
+        {
+            s_Raw.error = g_OpenError; // the open failure's Windows error, when there was one
             return s_Raw;
+        }
 
         s_Raw.file_open = true;
         DWORD s_Written = 0;
