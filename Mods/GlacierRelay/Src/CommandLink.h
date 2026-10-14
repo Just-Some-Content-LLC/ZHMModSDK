@@ -22,6 +22,15 @@
 // clears the queue (nothing pending is applied afterwards), resets the generation to 0 and
 // reconnects with backoff; a new link is a new generation, bound again by the welcome.
 //
+// Reconnect pacing (M5 pre-C-3 hardening, finding N4): every reconnect after a connection that
+// was established — refused during the handshake, closed by BEAM after the welcome (a failed
+// attestation shows exactly so), or lost later — waits the current backoff first, which grows
+// from backoff_initial_ms to backoff_max_ms on each consecutive retry and is reset only after a
+// welcomed link stayed up for stable_ms. Before the fix a welcomed-then-closed link reconnected
+// at once, about every 80 ms against a refusing BEAM. The pacing changes nothing about the
+// protocol: every new link is a new generation with a fresh welcome, a fresh nonce and a fresh
+// attest at the link's own version; no token or attestation is ever reused; no downgrade.
+//
 // Versions (M5 C-2B): with no run token configured the link speaks version 1 exactly as C-1 did.
 // With a token it speaks version 2: its hello says so, the welcome must be version 2 with a
 // nonce, and it answers once with an attest whose MAC covers that nonce, that generation and its
@@ -45,6 +54,7 @@ public:
         uint32_t welcome_timeout_ms = 2000;
         uint32_t backoff_initial_ms = 1000;
         uint32_t backoff_max_ms = 30000;
+        uint32_t stable_ms = 5000;     // a welcomed link counts as stable, resetting the backoff, after this long
         bool effectful = false; // [command] effectful: advertise and decode player.outfit.set/2
         std::string token;      // [command] token: 64 lowercase hex characters → protocol version 2; empty → version 1
     };
@@ -69,6 +79,9 @@ public:
         uint64_t protocol_violations = 0; // a line that could not be answered; the link closes
         uint64_t results_sent = 0;
         uint64_t cleared_on_disconnect = 0;
+        uint64_t reconnect_waits = 0;    // reconnects that waited the backoff first (N4 pacing)
+        uint32_t current_backoff_ms = 0; // the wait the next reconnect would take
+        uint64_t stable_links = 0;       // welcomed links that stayed up for stable_ms (backoff reset)
         uint32_t network_thread_id = 0;
     };
 

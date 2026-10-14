@@ -416,5 +416,99 @@ void RunCommandLinkTests()
         CHECK(s_Link2.ProtocolVersion() == 1);
     }
 
+    // 5. M5 pre-C-3 hardening (finding N4): bounded reconnect pacing. A link that BEAM welcomes and
+    //    then closes at once (how a refused attestation shows) is retried after the backoff, which
+    //    grows to its maximum, so a refusing BEAM sees a bounded number of connections; a link that
+    //    stays welcomed for stable_ms resets the backoff; every retry is a fresh link with a new
+    //    generation; a version-2 link refused three times recovers on the fourth welcome with a
+    //    fresh attest each time and no reuse.
+    {
+        CommandQueue s_Queue;
+        CommandLink::Options s_Options = Fast(s_Port); // backoff 50..200 ms
+        s_Options.stable_ms = 300;
+        CommandLink s_Link(s_Options, s_Queue, s_Adapter, MonoMs);
+        Listener s_Beam;
+        CHECK(s_Beam.Start(s_Port));
+
+        // (a) 1.2 s of welcome-then-close: paced connects (≈ 50 + 100 + 200 + 200 + ... ms apart).
+        const auto s_Start = std::chrono::steady_clock::now();
+        uint64_t s_Generation = 0;
+        int s_Welcomed = 0;
+        while (std::chrono::steady_clock::now() - s_Start < std::chrono::milliseconds(1200))
+        {
+            if (!s_Beam.Accept(200))
+                continue;
+            const std::string s_Hello = s_Beam.ReadLine(300);
+            if (!s_Hello.empty())
+            {
+                s_Beam.Send(CommandTest::Welcome(++s_Generation));
+                ++s_Welcomed;
+            }
+            s_Beam.CloseClient();
+        }
+        auto s_Stats = s_Link.GetStats();
+        std::printf("CommandLinkTests: pacing — %d welcomes closed at once in 1.2 s; link connects %llu, reconnect waits %llu, backoff now %u ms\n", s_Welcomed, s_Stats.connects, s_Stats.reconnect_waits, s_Stats.current_backoff_ms);
+        CHECK(s_Welcomed >= 2 && s_Stats.connects >= 2 && s_Stats.connects <= 12);
+        CHECK(s_Stats.reconnect_waits >= 2 && s_Stats.current_backoff_ms == s_Options.backoff_max_ms);
+        CHECK(s_Stats.protocol_violations == 0 && s_Stats.protocol_version == 1);
+
+        // (b) a welcomed link that stays up for stable_ms resets the backoff and keeps its generation.
+        const std::string s_Hello = Handshake(s_Beam, s_Link, s_Generation + 1);
+        CHECK(!s_Hello.empty() && s_Link.LinkGeneration() == s_Generation + 1);
+        CHECK(WaitUntil(2000, [&] { return s_Link.GetStats().stable_links == 1; }));
+        s_Stats = s_Link.GetStats();
+        CHECK(s_Stats.current_backoff_ms == s_Options.backoff_initial_ms && s_Stats.welcomed);
+
+        // (c) one loss after the stable link: the next reconnect waits the initial backoff once and
+        //     comes back as the next generation.
+        const uint64_t s_WaitsBefore = s_Stats.reconnect_waits;
+        s_Beam.CloseClient();
+        const std::string s_Hello2 = Handshake(s_Beam, s_Link, s_Generation + 2);
+        CHECK(!s_Hello2.empty() && s_Link.LinkGeneration() == s_Generation + 2);
+        CHECK(s_Link.GetStats().reconnect_waits == s_WaitsBefore + 1);
+        s_Beam.Stop();
+    }
+
+    {
+        // (d) version 2: three welcomes closed right after the attest (a refusing BEAM), then one
+        //     kept: four fresh attests, four generations, paced retries, no downgrade, no reuse.
+        const std::string s_Token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        CommandQueue s_Queue;
+        CommandLink::Options s_Options = Fast(s_Port);
+        s_Options.token = s_Token;
+        CommandLink s_Link(s_Options, s_Queue, s_Adapter, MonoMs);
+        Listener s_Beam;
+        CHECK(s_Beam.Start(s_Port));
+        std::vector<std::string> s_Macs;
+
+        for (uint64_t s_Gen = 1; s_Gen <= 4; ++s_Gen)
+        {
+            std::string s_Attest;
+            for (int s_Attempt = 0; s_Attempt < 20 && s_Attest.empty(); ++s_Attempt)
+            {
+                if (!s_Beam.Accept(3000))
+                    break;
+                const std::string s_Hello = s_Beam.ReadLine(1500);
+                if (s_Hello.empty()) { s_Beam.CloseClient(); continue; }
+                CHECK(Field(s_Hello, "command_protocol_version") == "2");
+                char s_Nonce[33];
+                std::snprintf(s_Nonce, sizeof(s_Nonce), "%032llx", 0x1000000000000000ull + s_Gen);
+                s_Beam.Send(CommandTest::WelcomeV2(s_Gen, s_Nonce));
+                s_Attest = s_Beam.ReadLine(1500);
+                if (s_Attest.empty()) s_Beam.CloseClient();
+            }
+            CHECK(!s_Attest.empty() && Field(s_Attest, "kind") == "attest" && Field(s_Attest, "link_generation") == std::to_string(s_Gen));
+            s_Macs.push_back(Field(s_Attest, "mac"));
+            if (s_Gen < 4)
+                s_Beam.CloseClient(); // refused: BEAM closes after the attest
+        }
+        CHECK(WaitUntil(1500, [&] { return s_Link.LinkGeneration() == 4; }));
+        const auto s_Stats = s_Link.GetStats();
+        std::printf("CommandLinkTests: pacing v2 — attests %llu, connects %llu, reconnect waits %llu, generation %llu\n", s_Stats.attests_sent, s_Stats.connects, s_Stats.reconnect_waits, s_Stats.link_generation);
+        CHECK(s_Stats.attests_sent == 4 && s_Stats.protocol_version == 2 && s_Stats.welcomed && s_Stats.reconnect_waits >= 3);
+        CHECK(s_Macs.size() == 4 && s_Macs[0] != s_Macs[1] && s_Macs[1] != s_Macs[2] && s_Macs[2] != s_Macs[3]);
+        s_Beam.Stop();
+    }
+
     WSACleanup();
 }

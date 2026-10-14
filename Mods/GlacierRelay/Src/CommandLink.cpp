@@ -63,9 +63,9 @@ CommandLink::CommandLink(Options p_Options, CommandQueue& p_Queue, std::string p
     m_Thread = std::thread([this] { Loop(); });
 
     RelayLog::Info(
-        "command link: client to {}:{} (connect timeout {} ms, welcome timeout {} ms, backoff {}..{} ms, queue {}, dedup window {}); protocol version {} ({}); effectful {}",
+        "command link: client to {}:{} (connect timeout {} ms, welcome timeout {} ms, backoff {}..{} ms, stable after {} ms, queue {}, dedup window {}); protocol version {} ({}); effectful {}",
         m_Options.host, m_Options.port, m_Options.connect_timeout_ms, m_Options.welcome_timeout_ms,
-        m_Options.backoff_initial_ms, m_Options.backoff_max_ms, CommandQueue::k_Capacity, CommandQueue::k_DedupWindow,
+        m_Options.backoff_initial_ms, m_Options.backoff_max_ms, m_Options.stable_ms, CommandQueue::k_Capacity, CommandQueue::k_DedupWindow,
         m_Version, m_Version == 2 ? "run token present; attestation on every welcome" : "no run token; no attestation", m_Options.effectful ? "enabled" : "disabled"
     );
 }
@@ -132,6 +132,14 @@ void CommandLink::Loop()
 
     uint32_t s_Backoff = m_Options.backoff_initial_ms;
     bool s_LoggedFailure = false;
+    bool s_WaitBeforeConnect = false; // a connection existed and ended: pace the next attempt (N4)
+    uint64_t s_WelcomedAtMono = 0;    // when the current link was welcomed (0: not welcomed)
+    bool s_StableCounted = false;
+
+    {
+        std::lock_guard s_Lock(m_Mutex);
+        m_Stats.current_backoff_ms = s_Backoff;
+    }
 
     for (;;)
     {
@@ -143,15 +151,44 @@ void CommandLink::Loop()
 
         if (AsSocket(m_Socket) == INVALID_SOCKET)
         {
+            if (s_WaitBeforeConnect)
+            {
+                // The previous link was refused, closed after its welcome or lost: wait the
+                // current backoff before the next attempt, then grow it. A refusing BEAM (wrong
+                // token, protocol violation) is therefore retried at a bounded rate, never in a
+                // tight loop; the retry is still a fresh link at the same version.
+                s_WaitBeforeConnect = false;
+                RelayLog::Warn("command link: reconnecting to {}:{} in {} ms", m_Options.host, m_Options.port, s_Backoff);
+                {
+                    std::lock_guard s_Lock(m_Mutex);
+                    ++m_Stats.reconnect_waits;
+                }
+
+                if (WaitStop(s_Backoff))
+                    break;
+
+                s_Backoff = std::min<uint32_t>(s_Backoff * 2, m_Options.backoff_max_ms);
+                {
+                    std::lock_guard s_Lock(m_Mutex);
+                    m_Stats.current_backoff_ms = s_Backoff;
+                }
+            }
+
             if (Connect() && Handshake())
             {
-                s_Backoff = m_Options.backoff_initial_ms;
                 s_LoggedFailure = false;
+                s_WelcomedAtMono = m_Clock();
+                s_StableCounted = false;
                 continue;
             }
 
             if (AsSocket(m_Socket) != INVALID_SOCKET)
+            {
+                // Connected but refused or not welcomed: the next attempt is paced like a loss.
                 Disconnect("handshake failed");
+                s_WaitBeforeConnect = true;
+                continue;
+            }
 
             if (!s_LoggedFailure)
             {
@@ -163,15 +200,37 @@ void CommandLink::Loop()
                 break;
 
             s_Backoff = std::min<uint32_t>(s_Backoff * 2, m_Options.backoff_max_ms);
+            {
+                std::lock_guard s_Lock(m_Mutex);
+                m_Stats.current_backoff_ms = s_Backoff;
+            }
             continue;
         }
 
-        // Connected and welcomed: read what BEAM sends, write what the scheduler produced.
+        // Connected and welcomed: read what BEAM sends, write what the scheduler produced. A link
+        // that stayed welcomed for stable_ms resets the backoff for the next loss.
+        if (!s_StableCounted && s_WelcomedAtMono != 0 && m_Clock() - s_WelcomedAtMono >= m_Options.stable_ms)
+        {
+            s_StableCounted = true;
+            s_Backoff = m_Options.backoff_initial_ms;
+            std::lock_guard s_Lock(m_Mutex);
+            ++m_Stats.stable_links;
+            m_Stats.current_backoff_ms = s_Backoff;
+        }
+
         if (!ReadLines(50))
+        {
+            s_WaitBeforeConnect = true;
+            s_WelcomedAtMono = 0;
             continue;
+        }
 
         if (!FlushResults())
+        {
+            s_WaitBeforeConnect = true;
+            s_WelcomedAtMono = 0;
             continue;
+        }
     }
 
     Disconnect("link shutting down");
