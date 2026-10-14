@@ -12,6 +12,10 @@ void RunRepositoryIdTests();
 void RunItemTelemetryTests();
 void RunObjectiveTelemetryTests();
 void RunPlayerStateTelemetryTests();
+void RunCommandProtocolTests();
+void RunCommandQueueTests();
+void RunCommandSchedulerTests();
+void RunCommandLinkTests();
 
 int main()
 {
@@ -27,6 +31,10 @@ int main()
     RunObjectiveTelemetryTests();
     RunPlayerStateTelemetryTests();
     RunTcpRelaySinkTests();
+    RunCommandProtocolTests();
+    RunCommandQueueTests();
+    RunCommandSchedulerTests();
+    RunCommandLinkTests();
 
     if (g_Failures == 0)
         std::printf("GlacierRelayTests: all checks passed\n");

@@ -9,6 +9,15 @@ cmake_minimum_required(VERSION 3.12)
 #   enforces the boundary.
 
 set(RELAY_ENGINE_INDEPENDENT_SOURCES
+        Src/CommandJson.cpp
+        Src/CommandJson.h
+        Src/CommandLink.cpp
+        Src/CommandLink.h
+        Src/CommandProtocol.cpp
+        Src/CommandProtocol.h
+        Src/CommandQueue.h
+        Src/CommandScheduler.cpp
+        Src/CommandScheduler.h
         Src/IRelaySink.h
         Src/Json.cpp
         Src/Json.h
@@ -65,6 +74,11 @@ find_package(fmt CONFIG REQUIRED)
 add_executable(GlacierRelayTests
         ${RELAY_ENGINE_INDEPENDENT_SOURCES}
         Tests/Main.cpp
+        Tests/CommandLinkTests.cpp
+        Tests/CommandProtocolTests.cpp
+        Tests/CommandQueueTests.cpp
+        Tests/CommandSchedulerTests.cpp
+        Tests/TestListener.h
         Tests/ContractLifecycleTests.cpp
         Tests/DisguiseTelemetryTests.cpp
         Tests/ItemTelemetryTests.cpp
@@ -114,6 +128,23 @@ target_include_directories(GlacierRelayWireProbe PRIVATE
 )
 
 target_link_libraries(GlacierRelayWireProbe PRIVATE
+        fmt::fmt
+        ws2_32
+)
+
+# M5-B: standalone Windows command probe — the real command link, queue and scheduler with a fake
+# frame source, no game, for the BEAM <-> native offline end-to-end gate.
+add_executable(GlacierRelayCommandProbe
+        ${RELAY_ENGINE_INDEPENDENT_SOURCES}
+        Tests/CommandProbe.cpp
+)
+
+target_include_directories(GlacierRelayCommandProbe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/Src
+        ${CMAKE_CURRENT_SOURCE_DIR}/Tests
+)
+
+target_link_libraries(GlacierRelayCommandProbe PRIVATE
         fmt::fmt
         ws2_32
 )

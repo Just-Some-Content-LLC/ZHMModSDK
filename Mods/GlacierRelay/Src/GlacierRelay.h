@@ -3,9 +3,14 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "IPluginInterface.h"
 
+#include "CommandLink.h"
+#include "CommandQueue.h"
+#include "CommandScheduler.h"
 #include "MissionObserver.h"
 #include "RelayAdapter.h"
 #include "SceneState.h"
@@ -25,7 +30,14 @@ class ZDynamicObject;
 // (ZAchievementManagerSimple::OnEventSent). The detour copies supported events into a bounded
 // queue and continues; the frame update drains the queue through TelemetryNormalizer and
 // publishes the resulting Relay events (actor.died, actor.pacified) while a mission attempt is
-// open. No UI, no inbound network, no writes to engine state.
+// open. No UI, no writes to engine state.
+//
+// Command link (M5-B, ADR 0009): optional and off by default ([command] enabled = false in
+// glacierrelay.ini). When enabled, a second outbound loopback client (CommandLink, its own
+// network thread, never a listener) receives allowlisted commands from BEAM; the frame update
+// schedules at most one per frame through CommandScheduler. The only executable entry is
+// relay.probe, which writes nothing and reports what the frame observed. The telemetry sink and
+// the detour are untouched by it; when disabled none of it is constructed.
 class GlacierRelay : public IPluginInterface
 {
 public:
@@ -38,6 +50,7 @@ public:
 private:
     void OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent);
     void ObserveFrame();
+    void ScheduleCommand(const SceneState& p_Scene);
     void ReportQueueDrops();
     void LogTelemetryCounters(const char* p_Reason);
 
@@ -80,6 +93,16 @@ private:
     uint64_t m_UngatedPublished = 0;   // ungated (contract lifecycle) events published, any predicate state
     uint64_t m_DropsLogged = 0;        // queue drops already reported
     uint64_t m_DropWarnings = 0;
+
+    // M5-B command path; all null when [command] enabled is false. Declared in this order so the
+    // scheduler (which emits into the link) is destroyed before the link (which joins its thread)
+    // and the link before the queue it drains.
+    uint64_t m_Frame = 0;                              // the adapter's own frame counter
+    std::optional<std::string> m_AttemptSessionId;     // the rise's game session id while an attempt is open
+    bool m_CommandThreadLogged = false;
+    std::unique_ptr<CommandQueue> m_CommandQueue;
+    std::unique_ptr<CommandLink> m_CommandLink;
+    std::unique_ptr<CommandScheduler> m_CommandScheduler;
 };
 
 DECLARE_ZHM_PLUGIN(GlacierRelay)

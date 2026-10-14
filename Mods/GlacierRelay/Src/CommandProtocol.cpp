@@ -1,0 +1,407 @@
+#include "CommandProtocol.h"
+
+#include <fmt/format.h>
+
+#include "CommandJson.h"
+#include "Json.h"
+
+namespace CommandProtocol
+{
+    const char* StatusText(Status p_Status)
+    {
+        switch (p_Status)
+        {
+            case Status::Received: return "received";
+            case Status::Rejected: return "rejected";
+            case Status::Busy: return "busy";
+            case Status::Duplicate: return "duplicate";
+            case Status::Expired: return "expired";
+            case Status::PreconditionFailed: return "precondition_failed";
+            case Status::Unavailable: return "unavailable";
+            case Status::Applied: return "applied";
+            case Status::Failed: return "failed";
+        }
+
+        return "failed";
+    }
+
+    Entry Lookup(std::string_view p_Name, uint32_t p_Version)
+    {
+        if (p_Name == "relay.probe" && p_Version == 1)
+            return Entry::RelayProbe1;
+        if (p_Name == "player.outfit.set" && p_Version == 1)
+            return Entry::PlayerOutfitSet1Reserved;
+        return Entry::Unknown;
+    }
+
+    bool ValidUuid(std::string_view p_Text)
+    {
+        // 8-4-4-4-12 lowercase hex, version nibble 1..5, variant nibble 8..b.
+        if (p_Text.size() != 36)
+            return false;
+
+        for (size_t i = 0; i < 36; ++i)
+        {
+            const char c = p_Text[i];
+
+            if (i == 8 || i == 13 || i == 18 || i == 23)
+            {
+                if (c != '-')
+                    return false;
+                continue;
+            }
+
+            const bool s_Hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            if (!s_Hex)
+                return false;
+        }
+
+        const char s_Version = p_Text[14];
+        const char s_Variant = p_Text[19];
+        return s_Version >= '1' && s_Version <= '5' && (s_Variant == '8' || s_Variant == '9' || s_Variant == 'a' || s_Variant == 'b');
+    }
+
+    namespace
+    {
+        using CommandJson::Value;
+
+        bool IsText(const Value* p_Value, size_t p_MaxBytes)
+        {
+            return p_Value && p_Value->kind == Value::Kind::String && p_Value->text.size() <= p_MaxBytes;
+        }
+
+        bool IsUnsigned(const Value* p_Value, uint64_t& p_Out)
+        {
+            if (!p_Value || p_Value->kind != Value::Kind::Number || !p_Value->is_integer || p_Value->integer < 0)
+                return false;
+            p_Out = static_cast<uint64_t>(p_Value->integer);
+            return true;
+        }
+
+        bool KnownKeys(const Value& p_Object, std::initializer_list<const char*> p_Allowed, std::string& p_Unknown)
+        {
+            for (const auto& s_Field : p_Object.fields)
+            {
+                bool s_Known = false;
+                for (const char* s_Key : p_Allowed)
+                    if (s_Field.first == s_Key)
+                        s_Known = true;
+
+                if (!s_Known)
+                {
+                    p_Unknown = s_Field.first;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        DecodedCommand Reject(DecodedCommand p_Decoded, std::string p_Reason)
+        {
+            p_Decoded.ok = false;
+            p_Decoded.reason = std::move(p_Reason);
+            return p_Decoded;
+        }
+
+        std::string Truncate(std::string_view p_Text, size_t p_Max)
+        {
+            if (p_Text.size() <= p_Max)
+                return std::string(p_Text);
+
+            // Cut on a UTF-8 boundary so the output stays valid.
+            size_t s_Cut = p_Max;
+            while (s_Cut > 0 && (static_cast<unsigned char>(p_Text[s_Cut]) & 0xC0) == 0x80)
+                --s_Cut;
+            return std::string(p_Text.substr(0, s_Cut));
+        }
+    }
+
+    DecodedCommand DecodeCommand(std::string_view p_Line)
+    {
+        DecodedCommand s_Out;
+
+        if (p_Line.size() > k_MaxLineBytes)
+            return Reject(s_Out, "line too long");
+
+        const auto s_Parsed = CommandJson::Parse(p_Line);
+
+        if (!s_Parsed.ok)
+            return Reject(s_Out, "invalid json: " + s_Parsed.error);
+
+        const Value& s_Root = s_Parsed.value;
+
+        if (s_Root.kind != Value::Kind::Object)
+            return Reject(s_Out, "not an object");
+
+        uint64_t s_Version = 0;
+        if (!IsUnsigned(s_Root.Find("command_protocol_version"), s_Version) || s_Version != static_cast<uint64_t>(k_ProtocolVersion))
+            return Reject(s_Out, "unsupported protocol version");
+
+        const Value* s_Kind = s_Root.Find("kind");
+        if (!IsText(s_Kind, 32) || s_Kind->text != "command")
+            return Reject(s_Out, "unknown kind");
+
+        // Identity first, so a rejection can be answered when they are valid.
+        const Value* s_Id = s_Root.Find("command_id");
+        if (!IsText(s_Id, 36) || !ValidUuid(s_Id->text))
+            return Reject(s_Out, "invalid command_id");
+        s_Out.command_id = s_Id->text;
+
+        uint64_t s_Generation = 0;
+        if (!IsUnsigned(s_Root.Find("link_generation"), s_Generation) || s_Generation == 0)
+            return Reject(s_Out, "invalid link_generation");
+        s_Out.link_generation = s_Generation;
+
+        std::string s_Unknown;
+        if (!KnownKeys(s_Root, {"command_protocol_version", "kind", "command_id", "link_generation", "issued_at", "ttl_ms", "name", "version", "params", "preconditions"}, s_Unknown))
+            return Reject(s_Out, "unknown field: " + s_Unknown);
+
+        const Value* s_IssuedAt = s_Root.Find("issued_at");
+        if (!IsText(s_IssuedAt, 64))
+            return Reject(s_Out, "invalid issued_at");
+
+        uint64_t s_Ttl = 0;
+        if (!IsUnsigned(s_Root.Find("ttl_ms"), s_Ttl) || s_Ttl < k_MinTtlMs || s_Ttl > k_MaxTtlMs)
+            return Reject(s_Out, "ttl_ms out of range");
+
+        const Value* s_Name = s_Root.Find("name");
+        if (!IsText(s_Name, 64))
+            return Reject(s_Out, "invalid name");
+
+        uint64_t s_CommandVersion = 0;
+        if (!IsUnsigned(s_Root.Find("version"), s_CommandVersion) || s_CommandVersion == 0 || s_CommandVersion > 1000)
+            return Reject(s_Out, "invalid version");
+
+        const Value* s_Params = s_Root.Find("params");
+        if (!s_Params || s_Params->kind != Value::Kind::Object)
+            return Reject(s_Out, "params not an object");
+
+        const Value* s_Preconditions = s_Root.Find("preconditions");
+        if (!s_Preconditions || s_Preconditions->kind != Value::Kind::Object)
+            return Reject(s_Out, "preconditions not an object");
+
+        Command& s_Command = s_Out.command;
+        s_Command.command_id = s_Id->text;
+        s_Command.link_generation = s_Generation;
+        s_Command.issued_at = s_IssuedAt->text;
+        s_Command.ttl_ms = static_cast<uint32_t>(s_Ttl);
+        s_Command.name = s_Name->text;
+        s_Command.version = static_cast<uint32_t>(s_CommandVersion);
+        s_Command.entry = Lookup(s_Command.name, s_Command.version);
+
+        // Preconditions: only mission_generation is defined; anything else is unknown.
+        for (const auto& s_Field : s_Preconditions->fields)
+        {
+            if (s_Field.first != "mission_generation")
+                return Reject(s_Out, "unknown precondition: " + s_Field.first);
+            if (!IsText(&s_Field.second, k_MaxMissionGenerationBytes))
+                return Reject(s_Out, "invalid precondition mission_generation");
+            s_Command.mission_generation_precondition = s_Field.second.text;
+        }
+
+        switch (s_Command.entry)
+        {
+            case Entry::RelayProbe1:
+                if (!s_Params->fields.empty())
+                    return Reject(s_Out, "unknown parameter: " + s_Params->fields.front().first);
+                break;
+
+            case Entry::PlayerOutfitSet1Reserved:
+            {
+                // Decoded for the record, never executed: the entry is reserved (M5 design 2.1).
+                for (const auto& s_Field : s_Params->fields)
+                {
+                    if (s_Field.first != "disguise_repository_id" && s_Field.first != "expect_current")
+                        return Reject(s_Out, "unknown parameter: " + s_Field.first);
+                    if (!IsText(&s_Field.second, 36) || !ValidUuid(s_Field.second.text))
+                        return Reject(s_Out, "invalid parameter: " + s_Field.first);
+                    s_Command.params.emplace_back(s_Field.first, s_Field.second.text);
+                }
+                return Reject(s_Out, "reserved command: not issuable");
+            }
+
+            case Entry::Unknown:
+                return Reject(s_Out, "unknown command: " + s_Command.name + "/" + std::to_string(s_Command.version));
+        }
+
+        s_Out.ok = true;
+        return s_Out;
+    }
+
+    bool DecodeWelcome(std::string_view p_Line, Welcome& p_Out, std::string& p_Reason)
+    {
+        if (p_Line.size() > k_MaxLineBytes)
+        {
+            p_Reason = "line too long";
+            return false;
+        }
+
+        const auto s_Parsed = CommandJson::Parse(p_Line);
+        if (!s_Parsed.ok)
+        {
+            p_Reason = "invalid json: " + s_Parsed.error;
+            return false;
+        }
+
+        const Value& s_Root = s_Parsed.value;
+        uint64_t s_Version = 0;
+
+        if (s_Root.kind != Value::Kind::Object || !IsUnsigned(s_Root.Find("command_protocol_version"), s_Version) || s_Version != static_cast<uint64_t>(k_ProtocolVersion))
+        {
+            p_Reason = "unsupported protocol version";
+            return false;
+        }
+
+        const Value* s_Kind = s_Root.Find("kind");
+        if (!IsText(s_Kind, 32) || s_Kind->text != "welcome")
+        {
+            p_Reason = "not a welcome";
+            return false;
+        }
+
+        std::string s_Unknown;
+        if (!KnownKeys(s_Root, {"command_protocol_version", "kind", "link_generation", "node", "allowlist"}, s_Unknown))
+        {
+            p_Reason = "unknown field: " + s_Unknown;
+            return false;
+        }
+
+        uint64_t s_Generation = 0;
+        if (!IsUnsigned(s_Root.Find("link_generation"), s_Generation) || s_Generation == 0)
+        {
+            p_Reason = "invalid link_generation";
+            return false;
+        }
+
+        const Value* s_Node = s_Root.Find("node");
+        if (!IsText(s_Node, 128))
+        {
+            p_Reason = "invalid node";
+            return false;
+        }
+
+        const Value* s_Allowlist = s_Root.Find("allowlist");
+        if (!s_Allowlist || s_Allowlist->kind != Value::Kind::Array || s_Allowlist->items.size() > 32)
+        {
+            p_Reason = "invalid allowlist";
+            return false;
+        }
+
+        p_Out.link_generation = s_Generation;
+        p_Out.node = s_Node->text;
+        p_Out.allowlist.clear();
+
+        for (const auto& s_Item : s_Allowlist->items)
+        {
+            uint64_t s_EntryVersion = 0;
+            const Value* s_Name = s_Item.Find("name");
+            if (s_Item.kind != Value::Kind::Object || !IsText(s_Name, 64) || !IsUnsigned(s_Item.Find("version"), s_EntryVersion))
+            {
+                p_Reason = "invalid allowlist entry";
+                return false;
+            }
+            p_Out.allowlist.emplace_back(s_Name->text, static_cast<uint32_t>(s_EntryVersion));
+        }
+
+        return true;
+    }
+
+    bool IsRefusal(std::string_view p_Line, std::string& p_Reason)
+    {
+        if (p_Line.size() > k_MaxLineBytes)
+            return false;
+
+        const auto s_Parsed = CommandJson::Parse(p_Line);
+        if (!s_Parsed.ok || s_Parsed.value.kind != Value::Kind::Object)
+            return false;
+
+        const Value* s_Kind = s_Parsed.value.Find("kind");
+        if (!IsText(s_Kind, 32) || s_Kind->text != "refused")
+            return false;
+
+        const Value* s_Why = s_Parsed.value.Find("reason");
+        p_Reason = IsText(s_Why, 64) ? s_Why->text : "unspecified";
+        return true;
+    }
+
+    std::string EncodeHello(const Hello& p_Hello)
+    {
+        std::string s_Capabilities = "[";
+        bool s_First = true;
+        size_t s_Count = 0;
+
+        for (const auto& s_Capability : p_Hello.capabilities)
+        {
+            if (++s_Count > 16)
+                break;
+            if (!s_First)
+                s_Capabilities += ",";
+            s_First = false;
+            s_Capabilities += Json::Quote(Truncate(s_Capability, 64));
+        }
+        s_Capabilities += "]";
+
+        return fmt::format(
+            "{{\"command_protocol_version\":{},\"kind\":\"hello\",\"adapter_instance_id\":{},\"native_at\":{},\"mission_generation\":{},\"capabilities\":{}}}\n",
+            k_ProtocolVersion, Json::Quote(p_Hello.adapter_instance_id), Json::Quote(Truncate(p_Hello.native_at, 64)),
+            p_Hello.mission_generation ? Json::Quote(Truncate(*p_Hello.mission_generation, k_MaxMissionGenerationBytes)) : "null",
+            s_Capabilities
+        );
+    }
+
+    namespace
+    {
+        std::string ObservedJson(const ObservedValue& p_Value)
+        {
+            switch (p_Value.kind)
+            {
+                case ObservedValue::Kind::Null: return "null";
+                case ObservedValue::Kind::Bool: return p_Value.boolean ? "true" : "false";
+                case ObservedValue::Kind::Integer: return std::to_string(p_Value.integer);
+                case ObservedValue::Kind::Number: return fmt::format("{}", p_Value.number);
+                case ObservedValue::Kind::Text: return Json::Quote(Truncate(p_Value.text, k_MaxObservedTextBytes));
+            }
+
+            return "null";
+        }
+    }
+
+    std::string EncodeResult(const Result& p_Result)
+    {
+        std::string s_Observed;
+
+        if (p_Result.observed.empty())
+        {
+            s_Observed = "null";
+        }
+        else
+        {
+            s_Observed = "{";
+            size_t s_Count = 0;
+            for (const auto& s_Entry : p_Result.observed)
+            {
+                if (++s_Count > k_MaxObservedEntries)
+                    break;
+                if (s_Count > 1)
+                    s_Observed += ",";
+                s_Observed += Json::Quote(Truncate(s_Entry.first, 64));
+                s_Observed += ":";
+                s_Observed += ObservedJson(s_Entry.second);
+            }
+            s_Observed += "}";
+        }
+
+        return fmt::format(
+            "{{\"command_protocol_version\":{},\"kind\":\"command.result\",\"command_id\":{},\"link_generation\":{},\"adapter_instance_id\":{},\"status\":\"{}\",\"reason\":{},\"native_at\":{},\"frame\":{},\"observed\":{},\"mission_generation\":{}}}\n",
+            k_ProtocolVersion, Json::Quote(p_Result.command_id), p_Result.link_generation,
+            p_Result.adapter_instance_id.empty() ? "null" : Json::Quote(p_Result.adapter_instance_id),
+            StatusText(p_Result.status),
+            p_Result.reason.empty() ? "null" : Json::Quote(Truncate(p_Result.reason, k_MaxReasonBytes)),
+            p_Result.native_at.empty() ? "null" : Json::Quote(Truncate(p_Result.native_at, 64)),
+            p_Result.frame ? std::to_string(*p_Result.frame) : "null",
+            s_Observed,
+            p_Result.mission_generation ? Json::Quote(Truncate(*p_Result.mission_generation, k_MaxMissionGenerationBytes)) : "null"
+        );
+    }
+}

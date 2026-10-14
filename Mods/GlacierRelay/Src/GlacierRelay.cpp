@@ -1,5 +1,9 @@
 #include "GlacierRelay.h"
 
+#include <Windows.h>
+
+#include <chrono>
+
 #include "Globals.h"
 #include "Hooks.h"
 #include "Logging.h"
@@ -91,6 +95,35 @@ void GlacierRelay::OnEngineInitialized()
     m_FrameUpdateRegistered = true;
 
     RelayLog::Info("OnEngineInitialized: frame update registered (priority 1, eUpdateAlways)");
+
+    // M5-B: the command link, only when the mod's settings ask for it:
+    //   [command] enabled = false (default)   no thread, no connection, no queue, nothing constructed
+    //   [command] port = 4749                 loopback only; the host is not configurable
+    if (GetSettingBool("command", "enabled", false))
+    {
+        CommandLink::Options s_Command;
+        const auto s_CommandPort = GetSettingInt("command", "port", s_Command.port);
+
+        if (s_CommandPort > 0 && s_CommandPort <= 65535)
+            s_Command.port = static_cast<uint16_t>(s_CommandPort);
+        else
+            RelayLog::Warn("command port setting {} is out of range; using {}", s_CommandPort, s_Command.port);
+
+        m_CommandQueue = std::make_unique<CommandQueue>();
+        m_CommandLink = std::make_unique<CommandLink>(s_Command, *m_CommandQueue, m_Adapter->InstanceId(), [] {
+            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        });
+        m_CommandScheduler = std::make_unique<CommandScheduler>(*m_CommandQueue, [this](const CommandProtocol::Result& p_Result) {
+            RelayLog::Info("command: {} {} on frame {}", p_Result.command_id, CommandProtocol::StatusText(p_Result.status), p_Result.frame ? *p_Result.frame : 0);
+            m_CommandLink->PushResult(p_Result);
+        });
+
+        RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1 only, one command per frame, no engine write", s_Command.port);
+    }
+    else
+    {
+        RelayLog::Info("command link disabled ([command] enabled = false, the default)");
+    }
 }
 
 // The detour. Minimum work on the engine's thread: read the name and the policy flag, copy the
@@ -197,9 +230,48 @@ void GlacierRelay::ObserveFrame()
     {
         RelayLog::Info("mission playing: {} -> {}", s_Frame.playing_before, s_Frame.playing_after);
 
+        // The attempt's session id (Glacier's ContractSessionId as observed on the rise) is the
+        // candidate mission generation of M5-B: it is held while the attempt is open and absent
+        // otherwise. It is Glacier's identity for the attempt, never derived here.
+        m_AttemptSessionId = s_Frame.playing_after ? s_GameSessionId : std::nullopt;
+
+        if (m_CommandLink)
+            m_CommandLink->SetMissionGeneration(m_AttemptSessionId);
+
         if (!s_Frame.playing_after)
             LogTelemetryCounters("attempt ended");
     }
+
+    ++m_Frame;
+
+    if (m_CommandScheduler)
+        ScheduleCommand(s_Scene);
+}
+
+// M5-B: at most one queued command per frame, judged on this frame's observation. relay.probe
+// writes nothing; its read-back is the plain values above. Runs after the frame's own
+// observation and publication so a command never reorders the telemetry sequence.
+void GlacierRelay::ScheduleCommand(const SceneState& p_Scene)
+{
+    CommandScheduler::FrameObservation s_Observation;
+    s_Observation.frame = m_Frame;
+    s_Observation.now_mono_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    s_Observation.native_at = RelayAdapter::UtcNow();
+    s_Observation.thread_id = GetCurrentThreadId();
+    s_Observation.scene_available = p_Scene.available;
+    s_Observation.scene = p_Scene;
+    s_Observation.mission_playing = m_MissionObserver.Playing();
+    s_Observation.mission_generation = m_AttemptSessionId;
+    s_Observation.link_generation = m_CommandLink->LinkGeneration();
+    s_Observation.adapter_instance_id = m_Adapter->InstanceId();
+
+    if (!m_CommandThreadLogged)
+    {
+        m_CommandThreadLogged = true;
+        RelayLog::Info("command scheduler: first frame on thread {} (network thread {})", s_Observation.thread_id, m_CommandLink->GetStats().network_thread_id);
+    }
+
+    m_CommandScheduler->Tick(s_Observation);
 }
 
 // Queue drops are counted by the detour side; they are reported here, on the frame thread, with a
