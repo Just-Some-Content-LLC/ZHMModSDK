@@ -15,12 +15,25 @@
 // a fake generation, a fake hero outfit and a fake kit table), "unavailable" (scene state not
 // readable), "restart" (as mission, then from fake frame 8 the fake registry names the next
 // generation while the predicate still holds — the race M5-B observed — the predicate falls at
-// frame 12 and rises again at frame 16 with the new generation).
+// frame 12 and rises again at frame 16 with the new generation). M5 C-2C adds three scripted
+// mission variants for the precondition matrix: "no-contract-start" (as mission, but no
+// contract.started is ever observed for the attempt), "contract-ended" (as mission; from fake
+// frame 6 a contract.ended for the active generation has been observed while the predicate still
+// holds), "registry-ahead" (as mission; from fake frame 6 the fake registry names the next
+// generation while the edge-cached generation and the predicate stay as they were, with no fall).
 // inert|effectful: whether the link advertises and decodes player.outfit.set/2 and the frame source
 // carries the fake applier (the DLL's [command] effectful setting). Default inert.
 // apply-mode (effectful only): "ok" (the fake setter changes the fake tuple; default), "unchanged",
 // "elsewhere", "fault" (the fake setter reports a fault; the real guard would fail-stop instead),
-// "readback-missing", "post-generation".
+// "readback-missing", "post-generation". M5 C-2C adds: "setter-unavailable" (the fake setter is
+// reported absent, as on a build where the pattern is not found); "exit-after-call" (the process
+// terminates abruptly right after the fake setter returned and before the result is written to the
+// link — link loss after application, before result delivery); "log-unavailable", "log-failed" and
+// "log-short" (the real RelayLog's raw writer is replaced through its test seam by a scripted
+// writer that reports the FIRST "applying" line as not accepted — file not open, WriteFile failed,
+// or fewer bytes than requested — and accepts every later line; every other line is passed
+// through to a probe-owned file, so the production logging contract is exercised unchanged and
+// the second effectful command of a scenario proves the refusal does not latch).
 // Exit code 0 when the link connected and was welcomed at least once.
 
 #include <Windows.h>
@@ -29,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "CommandLink.h"
@@ -150,11 +164,25 @@ namespace
             return inner.Observe(p_CandidateId);
         }
 
+        bool exit_after_call = false; // M5 C-2C: terminate the process right after the fake call returned
+
         OutfitApply::CallOutcome Invoke(int32_t p_Charset, int32_t p_Variation) override
         {
             const auto s_Outcome = inner.Invoke(p_Charset, p_Variation);
             RelayLog::Info("command probe: FAKE setter invoked (charset {}, variation {}); called {} faulted {} — simulated, no engine", p_Charset, p_Variation, s_Outcome.called, s_Outcome.faulted);
             std::printf("command probe: FAKE setter invoked (charset %d, variation %d); called %d faulted %d (simulated; no engine)\n", p_Charset, p_Variation, s_Outcome.called ? 1 : 0, s_Outcome.faulted ? 1 : 0);
+
+            if (exit_after_call)
+            {
+                // Link loss after application and before result delivery: the process ends here, on
+                // the fake frame thread, with the fake setter's effect in place and no result ever
+                // written to the link (the probe's clean shutdown is deliberately not run).
+                RelayLog::Info("command probe: terminating the process right after the FAKE setter returned (simulated link loss after application, before the result)");
+                std::printf("command probe: terminating the process right after the FAKE setter returned (simulated link loss after application, before the result)\n");
+                std::fflush(stdout);
+                TerminateProcess(GetCurrentProcess(), 3);
+            }
+
             return s_Outcome;
         }
 
@@ -162,13 +190,92 @@ namespace
         bool Latched() const override { return inner.Latched(); }
         void Release() override { inner.Release(); }
     };
+
+    // M5 C-2C: the scripted raw log writer for the "log-*" apply modes. Installed through
+    // RelayLog::SetRawWriterForTests (the test seam of correction B; never set in the DLL), so the
+    // production WriteLine / WriteChecked / OutfitApply path runs unchanged and only the lowest
+    // write is scripted. The FIRST line containing the apply's "applying" marker is reported as not
+    // accepted in the scripted way; every other line — and every later applying line — is passed
+    // through to a probe-owned file (the real per-process log file stays open but unused while the
+    // seam is installed, which the probe states in its output).
+    enum class LogMode { None, Unavailable, Failed, Short };
+    LogMode g_LogMode = LogMode::None;
+    int g_ApplyingLinesSeen = 0;
+    HANDLE g_PassThrough = INVALID_HANDLE_VALUE;
+
+    RelayLog::RawWrite PassThrough(const char* p_Data, uint32_t p_Size)
+    {
+        RelayLog::RawWrite s_Raw;
+        if (g_PassThrough == INVALID_HANDLE_VALUE)
+            return s_Raw; // file_open false: the probe could not open its pass-through file
+        s_Raw.file_open = true;
+        DWORD s_Written = 0;
+        s_Raw.succeeded = WriteFile(g_PassThrough, p_Data, p_Size, &s_Written, nullptr) != FALSE;
+        s_Raw.written = s_Written;
+        s_Raw.error = s_Raw.succeeded ? 0 : GetLastError();
+        return s_Raw;
+    }
+
+    RelayLog::RawWrite ScriptedRawWrite(const char* p_Data, uint32_t p_Size)
+    {
+        const bool s_Applying = std::string_view(p_Data, p_Size).find("applying player.outfit.set/2") != std::string_view::npos;
+        if (!s_Applying || g_ApplyingLinesSeen++ != 0 || g_LogMode == LogMode::None)
+        {
+            if (s_Applying)
+                std::printf("command probe: FAKE log writer: applying line %d passed through and accepted (%u bytes)\n", g_ApplyingLinesSeen, p_Size);
+            return PassThrough(p_Data, p_Size);
+        }
+
+        RelayLog::RawWrite s_Raw;
+        const char* s_What = "";
+        switch (g_LogMode)
+        {
+            case LogMode::Unavailable:
+                s_Raw.file_open = false;
+                s_Raw.error = ERROR_PATH_NOT_FOUND;
+                s_What = "file not open (simulated ERROR_PATH_NOT_FOUND)";
+                break;
+            case LogMode::Failed:
+                s_Raw.file_open = true;
+                s_Raw.succeeded = false;
+                s_Raw.error = ERROR_WRITE_FAULT;
+                s_What = "WriteFile failed (simulated ERROR_WRITE_FAULT)";
+                break;
+            case LogMode::Short:
+                s_Raw.file_open = true;
+                s_Raw.succeeded = true;
+                s_Raw.written = p_Size > 7 ? p_Size - 7 : 0;
+                s_What = "short write (simulated: 7 bytes fewer than requested)";
+                break;
+            default:
+                break;
+        }
+        std::printf("command probe: FAKE log writer: applying line 1 NOT accepted — %s; %u bytes requested, %u accepted (simulated; the line is not in any file)\n", s_What, p_Size, s_Raw.written);
+        return s_Raw;
+    }
+
+    bool OpenPassThrough()
+    {
+        wchar_t s_Dir[MAX_PATH] = {};
+        DWORD s_Len = GetEnvironmentVariableW(L"GLACIERRELAY_LOG_DIR", s_Dir, MAX_PATH);
+        if (s_Len == 0 || s_Len >= MAX_PATH)
+        {
+            s_Len = GetTempPathW(MAX_PATH, s_Dir);
+            if (s_Len == 0 || s_Len >= MAX_PATH)
+                return false;
+        }
+        wchar_t s_Path[MAX_PATH] = {};
+        swprintf_s(s_Path, L"%s\\command-probe-passthrough-%lu.log", s_Dir, GetCurrentProcessId());
+        g_PassThrough = CreateFileW(s_Path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        return g_PassThrough != INVALID_HANDLE_VALUE;
+    }
 }
 
 int main(int p_Argc, char** p_Argv)
 {
     if (p_Argc < 4)
     {
-        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation]\n");
+        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short]\n");
         return 2;
     }
 
@@ -206,6 +313,19 @@ int main(int p_Argc, char** p_Argv)
     else if (s_ApplyMode == "fault") s_Applier.inner.world.mode = FakeOutfit::Mode::FaultDuringCall;
     else if (s_ApplyMode == "readback-missing") s_Applier.inner.world.mode = FakeOutfit::Mode::ReadBackUnavailable;
     else if (s_ApplyMode == "post-generation") s_Applier.inner.world.mode = FakeOutfit::Mode::PostGenerationChange;
+    else if (s_ApplyMode == "exit-after-call") s_Applier.exit_after_call = true;
+    else if (s_ApplyMode == "log-unavailable") g_LogMode = LogMode::Unavailable;
+    else if (s_ApplyMode == "log-failed") g_LogMode = LogMode::Failed;
+    else if (s_ApplyMode == "log-short") g_LogMode = LogMode::Short;
+    const bool s_SetterUnavailable = s_ApplyMode == "setter-unavailable";
+
+    if (g_LogMode != LogMode::None)
+    {
+        const bool s_Opened = OpenPassThrough();
+        const auto s_Previous = RelayLog::SetRawWriterForTests(&ScriptedRawWrite);
+        std::printf("command probe: scripted raw log writer installed through the test seam (previous writer %s; pass-through file %s): the first applying line will be reported as not accepted, later lines pass through; the per-process relay log file is not written while the seam is installed\n", s_Previous ? "set" : "null", s_Opened ? "open" : "NOT open");
+        RelayLog::Info("command probe: scripted raw log writer installed (mode {}); this line and the following ones are in the pass-through file", s_ApplyMode);
+    }
 
     CommandQueue s_Queue;
     CommandLink::Options s_Options;
@@ -239,8 +359,9 @@ int main(int p_Argc, char** p_Argv)
         std::optional<std::string> s_ContractStarted, s_ContractEnded;
         const std::string s_Generation1 = "fake-session-" + s_Adapter.substr(0, 8) + "-1";
         const std::string s_Generation2 = "fake-session-" + s_Adapter.substr(0, 8) + "-2";
-        const bool s_Mission = s_SceneMode == "mission" || s_SceneMode == "restart";
+        const bool s_Mission = s_SceneMode == "mission" || s_SceneMode == "restart" || s_SceneMode == "no-contract-start" || s_SceneMode == "contract-ended" || s_SceneMode == "registry-ahead";
         FakeWorld s_World;
+        s_World.setter_available = !s_SetterUnavailable;
         s_Applier.world = &s_World;
 
         auto s_Advance = [&](const char* p_Why) {
@@ -262,6 +383,8 @@ int main(int p_Argc, char** p_Argv)
                 else if (s_Frame >= 12 && s_Frame < 16) { s_Playing = false; s_Registry = s_Generation2; }
                 else if (s_Frame >= 16) { s_Playing = true; s_Registry = s_Generation2; }
             }
+            if (s_SceneMode == "registry-ahead" && s_Frame >= 6)
+                s_Registry = s_Generation2; // the registry moved on; the predicate and the cached generation did not
             s_World.playing = s_Playing;
             s_World.hero_present = s_Playing;
             s_World.registry_generation = s_Registry;
@@ -274,14 +397,15 @@ int main(int p_Argc, char** p_Argv)
                 s_RiseFrame = s_Frame;
                 s_RiseMono = MonoMs();
                 s_RegistryChangeAdvanced = false;
-                s_ContractStarted = s_Registry; // contract.started observed right after the rise
+                if (s_SceneMode != "no-contract-start")
+                    s_ContractStarted = s_Registry; // contract.started observed right after the rise
             }
             else if (!s_Playing && s_PrevPlaying)
             {
                 s_Advance("mission predicate fall");
                 s_Cached.reset();
             }
-            if (s_SceneMode == "restart" && s_Frame == 8)
+            if ((s_SceneMode == "restart" && s_Frame == 8) || (s_SceneMode == "contract-ended" && s_Frame == 6))
             {
                 s_ContractEnded = s_Generation1; // contract.ended for the active generation (before the fall)
                 s_Advance("contract end observed for the active generation");
