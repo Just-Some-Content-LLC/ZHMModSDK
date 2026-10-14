@@ -82,6 +82,20 @@ void GlacierRelay::OnEngineInitialized()
     const ZString s_TelemetryLog = GetSetting("relay", "telemetry_log", "names");
     m_TelemetryLog = s_TelemetryLog == "off" ? TelemetryLog::Off : TelemetryLog::Names;
 
+    // M5 C-1: with the command link enabled, the sink is wrapped by a tee that reports the contract
+    // lifecycle envelopes' session ids to the transition instrumentation (forwarding every envelope
+    // unchanged). With it disabled the sink chain is exactly the M2 one.
+    const bool s_CommandEnabled = GetSettingBool("command", "enabled", false);
+
+    if (s_CommandEnabled)
+    {
+        auto s_Tee = std::make_unique<LifecycleTee>(std::move(s_Sink), [this](LifecycleTee::Kind p_Kind, const std::string& p_Id) {
+            OnContractLifecycle(p_Kind, p_Id);
+        });
+        m_LifecycleTee = s_Tee.get();
+        s_Sink = std::move(s_Tee);
+    }
+
     m_Adapter = std::make_unique<RelayAdapter>(std::move(s_Sink), RelayAdapter::NewInstanceId(), &RelayAdapter::UtcNow);
 
     RelayLog::Info(
@@ -99,7 +113,7 @@ void GlacierRelay::OnEngineInitialized()
     // M5-B: the command link, only when the mod's settings ask for it:
     //   [command] enabled = false (default)   no thread, no connection, no queue, nothing constructed
     //   [command] port = 4749                 loopback only; the host is not configurable
-    if (GetSettingBool("command", "enabled", false))
+    if (s_CommandEnabled)
     {
         CommandLink::Options s_Command;
         const auto s_CommandPort = GetSettingInt("command", "port", s_Command.port);
@@ -118,7 +132,7 @@ void GlacierRelay::OnEngineInitialized()
             m_CommandLink->PushResult(p_Result);
         });
 
-        RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1 only, one command per frame, no engine write", s_Command.port);
+        RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1 and relay.inspect.outfit/1 (read-only), one command per frame, no engine write", s_Command.port);
     }
     else
     {
@@ -236,22 +250,42 @@ void GlacierRelay::ObserveFrame()
         m_AttemptSessionId = s_Frame.playing_after ? s_GameSessionId : std::nullopt;
 
         if (m_CommandLink)
+        {
             m_CommandLink->SetMissionGeneration(m_AttemptSessionId);
+
+            // M5 C-1: every predicate edge advances the Relay transition epoch; a rise records
+            // its frame, clock and scene resource and resets the once-per-attempt markers.
+            AdvanceEpoch(s_Frame.playing_after ? "mission predicate rise" : "mission predicate fall");
+
+            if (s_Frame.playing_after)
+            {
+                m_RiseFrame = m_Frame + 1; // the number this frame will carry below
+                m_RiseMonoMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                m_RiseSceneResource = s_Scene.available ? s_Scene.scene_resource : std::string();
+                m_SceneUnavailableAdvanced = false;
+                m_RegistryChangeAdvanced = false;
+            }
+        }
 
         if (!s_Frame.playing_after)
             LogTelemetryCounters("attempt ended");
+    }
+    else if (m_CommandLink && m_AttemptSessionId && !s_Scene.available && !m_SceneUnavailableAdvanced)
+    {
+        m_SceneUnavailableAdvanced = true;
+        AdvanceEpoch("scene state unavailable during an attempt");
     }
 
     ++m_Frame;
 
     if (m_CommandScheduler)
-        ScheduleCommand(s_Scene);
+        ScheduleCommand(s_Scene, s_Frame.playing_before);
 }
 
 // M5-B: at most one queued command per frame, judged on this frame's observation. relay.probe
 // writes nothing; its read-back is the plain values above. Runs after the frame's own
 // observation and publication so a command never reorders the telemetry sequence.
-void GlacierRelay::ScheduleCommand(const SceneState& p_Scene)
+void GlacierRelay::ScheduleCommand(const SceneState& p_Scene, bool p_PlayingBefore)
 {
     CommandScheduler::FrameObservation s_Observation;
     s_Observation.frame = m_Frame;
@@ -264,6 +298,17 @@ void GlacierRelay::ScheduleCommand(const SceneState& p_Scene)
     s_Observation.mission_generation = m_AttemptSessionId;
     s_Observation.link_generation = m_CommandLink->LinkGeneration();
     s_Observation.adapter_instance_id = m_Adapter->InstanceId();
+
+    // M5 C-1: the transition instrumentation as plain values, and the inspector the scheduler may
+    // call on this frame for relay.inspect.outfit only (never on an idle frame).
+    s_Observation.relay_transition_epoch = m_TransitionEpoch;
+    s_Observation.previous_frame_playing = p_PlayingBefore;
+    s_Observation.rise_frame = m_RiseFrame;
+    s_Observation.rise_mono_ms = m_RiseMonoMs;
+    s_Observation.scene_resource_same_as_rise = p_Scene.available && p_Scene.scene_resource == m_RiseSceneResource;
+    s_Observation.contract_started_seen = m_ContractStartedSeen;
+    s_Observation.contract_ended_seen = m_ContractEndedSeen;
+    s_Observation.inspector = [this](const std::optional<std::string>& p_CandidateId) { return InspectOutfit(p_CandidateId); };
 
     if (!m_CommandThreadLogged)
     {
@@ -306,6 +351,66 @@ void GlacierRelay::LogTelemetryCounters(const char* p_Reason)
         m_Intake.unreadable.load(), m_Intake.truncated.load(), s_Queue.pushed, s_Queue.dropped, s_Norm.normalized,
         s_Norm.malformed, m_OutsideAttempt, m_UngatedPublished
     );
+}
+
+// ---- M5 C-1: transition instrumentation and the frame-local inspection ------------------------
+
+void GlacierRelay::AdvanceEpoch(const char* p_Why)
+{
+    ++m_TransitionEpoch;
+    RelayLog::Info("relay transition epoch {}: {} (frame {})", m_TransitionEpoch, p_Why, m_Frame);
+}
+
+// Called by the lifecycle tee on the frame thread while a contract envelope is published.
+void GlacierRelay::OnContractLifecycle(LifecycleTee::Kind p_Kind, const std::string& p_ContractSessionId)
+{
+    if (p_Kind == LifecycleTee::Kind::ContractStarted)
+    {
+        m_ContractStartedSeen = p_ContractSessionId;
+        return;
+    }
+
+    m_ContractEndedSeen = p_ContractSessionId;
+
+    if (m_AttemptSessionId && *m_AttemptSessionId == p_ContractSessionId)
+        AdvanceEpoch("contract end observed for the active generation");
+    else
+        ++m_ContractEndsOtherGeneration;
+}
+
+// The scheduler's inspector: the guarded engine reads of this frame, under their own fault guard
+// so a fault inside a read is logged with the command's context and reported as unavailable
+// rather than ending the frame. A registry generation that differs from the edge-cached one is
+// itself transition evidence and advances the epoch (once per attempt) for the frames after it.
+OutfitObservation::EngineReads GlacierRelay::InspectOutfit(const std::optional<std::string>& p_CandidateId)
+{
+    OutfitObservation::EngineReads s_Reads;
+    bool s_Completed = false;
+
+    RelayLog::Guard("InspectOutfit", [&] {
+        s_Reads = SceneObservation::ObserveOutfit(p_CandidateId);
+        s_Completed = true;
+    });
+
+    if (!s_Completed)
+    {
+        OutfitObservation::EngineReads s_Faulted;
+        s_Faulted.thread_id = GetCurrentThreadId();
+        s_Faulted.generation_fresh = OutfitObservation::Field<std::string>::Of(CommandProtocol::FieldStatus::Unavailable, "fault during the inspection reads");
+        s_Faulted.hero.outfit_id = OutfitObservation::Field<std::string>::Of(CommandProtocol::FieldStatus::Unavailable, "fault during the inspection reads");
+        s_Faulted.hero.heroa_valid = OutfitObservation::Field<bool>::Of(CommandProtocol::FieldStatus::Unavailable, "fault during the inspection reads");
+        s_Faulted.set_outfit_available = OutfitObservation::Field<bool>::Of(CommandProtocol::FieldStatus::Unavailable, "fault during the inspection reads");
+        s_Faulted.kit_map_available = OutfitObservation::Field<bool>::Of(CommandProtocol::FieldStatus::Unavailable, "fault during the inspection reads");
+        return s_Faulted;
+    }
+
+    if (m_AttemptSessionId && s_Reads.generation_fresh.observed() && *s_Reads.generation_fresh.value != *m_AttemptSessionId && !m_RegistryChangeAdvanced)
+    {
+        m_RegistryChangeAdvanced = true;
+        AdvanceEpoch("registry generation differs from the edge-cached generation on an inspection frame");
+    }
+
+    return s_Reads;
 }
 
 DEFINE_ZHM_PLUGIN(GlacierRelay);

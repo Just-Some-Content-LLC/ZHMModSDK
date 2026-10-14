@@ -25,10 +25,26 @@ namespace CommandProtocol
         return "failed";
     }
 
+    const char* FieldStatusText(FieldStatus p_Status)
+    {
+        switch (p_Status)
+        {
+            case FieldStatus::Observed: return "observed";
+            case FieldStatus::Unavailable: return "unavailable";
+            case FieldStatus::Unsupported: return "unsupported";
+            case FieldStatus::Inconsistent: return "inconsistent";
+            case FieldStatus::PreconditionFailed: return "precondition_failed";
+        }
+
+        return "unavailable";
+    }
+
     Entry Lookup(std::string_view p_Name, uint32_t p_Version)
     {
         if (p_Name == "relay.probe" && p_Version == 1)
             return Entry::RelayProbe1;
+        if (p_Name == "relay.inspect.outfit" && p_Version == 1)
+            return Entry::RelayInspectOutfit1;
         if (p_Name == "player.outfit.set" && p_Version == 1)
             return Entry::PlayerOutfitSet1Reserved;
         return Entry::Unknown;
@@ -207,6 +223,20 @@ namespace CommandProtocol
                     return Reject(s_Out, "unknown parameter: " + s_Params->fields.front().first);
                 break;
 
+            case Entry::RelayInspectOutfit1:
+            {
+                // M5 C-1: one optional, strictly validated repository id (UUID text); nothing else.
+                for (const auto& s_Field : s_Params->fields)
+                {
+                    if (s_Field.first != "disguise_repository_id")
+                        return Reject(s_Out, "unknown parameter: " + s_Field.first);
+                    if (!IsText(&s_Field.second, 36) || !ValidUuid(s_Field.second.text))
+                        return Reject(s_Out, "invalid parameter: " + s_Field.first);
+                    s_Command.params.emplace_back(s_Field.first, s_Field.second.text);
+                }
+                break;
+            }
+
             case Entry::PlayerOutfitSet1Reserved:
             {
                 // Decoded for the record, never executed: the entry is reserved (M5 design 2.1).
@@ -352,7 +382,7 @@ namespace CommandProtocol
 
     namespace
     {
-        std::string ObservedJson(const ObservedValue& p_Value)
+        std::string ScalarJson(const ObservedValue& p_Value)
         {
             switch (p_Value.kind)
             {
@@ -364,6 +394,32 @@ namespace CommandProtocol
             }
 
             return "null";
+        }
+
+        std::string ObservedJson(const ObservedValue& p_Value)
+        {
+            if (!p_Value.field_status)
+                return ScalarJson(p_Value);
+
+            // M5 C-1 field object: the value only when observed, the reason only when given.
+            std::string s_Object = "{\"status\":\"";
+            s_Object += FieldStatusText(*p_Value.field_status);
+            s_Object += "\"";
+
+            if (*p_Value.field_status == FieldStatus::Observed && p_Value.kind != ObservedValue::Kind::Null)
+            {
+                s_Object += ",\"value\":";
+                s_Object += ScalarJson(p_Value);
+            }
+
+            if (!p_Value.field_reason.empty())
+            {
+                s_Object += ",\"reason\":";
+                s_Object += Json::Quote(Truncate(p_Value.field_reason, k_MaxObservedReasonBytes));
+            }
+
+            s_Object += "}";
+            return s_Object;
         }
     }
 

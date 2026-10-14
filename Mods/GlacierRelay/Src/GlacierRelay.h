@@ -11,6 +11,7 @@
 #include "CommandLink.h"
 #include "CommandQueue.h"
 #include "CommandScheduler.h"
+#include "LifecycleTee.h"
 #include "MissionObserver.h"
 #include "RelayAdapter.h"
 #include "SceneState.h"
@@ -50,9 +51,18 @@ public:
 private:
     void OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent);
     void ObserveFrame();
-    void ScheduleCommand(const SceneState& p_Scene);
+    void ScheduleCommand(const SceneState& p_Scene, bool p_PlayingBefore);
     void ReportQueueDrops();
     void LogTelemetryCounters(const char* p_Reason);
+
+    // M5 C-1 transition instrumentation (Relay-authored; never an engine value). AdvanceEpoch is
+    // called on exactly these observations: a mission predicate rise, a fall, a contract.ended
+    // observed for the active generation, the scene becoming unavailable during an attempt (once
+    // per attempt), and a registry generation read on an inspection frame that differs from the
+    // edge-cached one (once per attempt). It does not claim to see every engine transition.
+    void AdvanceEpoch(const char* p_Why);
+    void OnContractLifecycle(LifecycleTee::Kind p_Kind, const std::string& p_ContractSessionId);
+    OutfitObservation::EngineReads InspectOutfit(const std::optional<std::string>& p_CandidateId);
 
     DECLARE_PLUGIN_DETOUR(
         GlacierRelay, void, OnTelemetryEventSent, ZAchievementManagerSimple* th, uint32_t eventIndex,
@@ -103,6 +113,19 @@ private:
     std::unique_ptr<CommandQueue> m_CommandQueue;
     std::unique_ptr<CommandLink> m_CommandLink;
     std::unique_ptr<CommandScheduler> m_CommandScheduler;
+
+    // M5 C-1 transition instrumentation (only maintained when the command link is enabled; the
+    // tee is owned by the adapter's sink chain and this is a non-owning view for its stats).
+    LifecycleTee* m_LifecycleTee = nullptr;
+    uint64_t m_TransitionEpoch = 0;
+    uint64_t m_RiseFrame = 0;
+    uint64_t m_RiseMonoMs = 0;
+    std::string m_RiseSceneResource;
+    std::optional<std::string> m_ContractStartedSeen; // the last contract.started's session id
+    std::optional<std::string> m_ContractEndedSeen;   // the last contract.ended's session id
+    bool m_SceneUnavailableAdvanced = false;          // once per attempt
+    bool m_RegistryChangeAdvanced = false;            // once per attempt
+    uint64_t m_ContractEndsOtherGeneration = 0;       // contract.ended seen for a generation that is not the active one
 };
 
 DECLARE_ZHM_PLUGIN(GlacierRelay)

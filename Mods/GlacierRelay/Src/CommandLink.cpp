@@ -247,7 +247,7 @@ bool CommandLink::Handshake()
     CommandProtocol::Hello s_Hello;
     s_Hello.adapter_instance_id = m_AdapterInstanceId;
     s_Hello.native_at = UtcNowText();
-    s_Hello.capabilities = {"relay.probe/1"};
+    s_Hello.capabilities = {"relay.probe/1", "relay.inspect.outfit/1"};
 
     {
         std::lock_guard s_Lock(m_Mutex);

@@ -16,6 +16,7 @@ void RunCommandProtocolTests();
 void RunCommandQueueTests();
 void RunCommandSchedulerTests();
 void RunCommandLinkTests();
+void RunOutfitInspectionTests();
 
 int main()
 {
@@ -35,6 +36,7 @@ int main()
     RunCommandQueueTests();
     RunCommandSchedulerTests();
     RunCommandLinkTests();
+    RunOutfitInspectionTests();
 
     if (g_Failures == 0)
         std::printf("GlacierRelayTests: all checks passed\n");

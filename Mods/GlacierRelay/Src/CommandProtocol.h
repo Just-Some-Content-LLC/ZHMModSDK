@@ -24,9 +24,26 @@ namespace CommandProtocol
     constexpr uint32_t k_MinTtlMs = 100;
     constexpr uint32_t k_MaxTtlMs = 10000;
     constexpr size_t k_MaxReasonBytes = 200;
-    constexpr size_t k_MaxObservedEntries = 16;
+    // M5 C-1 raised the read-back bound from 16 to 48 entries (BEAM's schema agrees) so an
+    // inspection can report every field with its own status; the line bound is unchanged and the
+    // scheduler reduces an inspection that would not fit rather than exceeding it.
+    constexpr size_t k_MaxObservedEntries = 48;
     constexpr size_t k_MaxObservedTextBytes = 128;
+    constexpr size_t k_MaxObservedReasonBytes = 40;
     constexpr size_t k_MaxMissionGenerationBytes = 64;
+
+    // The per-field status of an inspection read-back (M5 C-1). A field with a status other than
+    // Observed carries no value: nothing is defaulted, zeroed or assumed.
+    enum class FieldStatus
+    {
+        Observed,
+        Unavailable,
+        Unsupported,
+        Inconsistent,
+        PreconditionFailed,
+    };
+
+    const char* FieldStatusText(FieldStatus p_Status);
 
     // The closed status vocabulary (the same nine words as BEAM's schema).
     enum class Status
@@ -44,12 +61,14 @@ namespace CommandProtocol
 
     const char* StatusText(Status p_Status);
 
-    // The compiled allowlist. Only relay.probe v1 is executable; player.outfit.set v1 is reserved
+    // The compiled allowlist. relay.probe v1 and relay.inspect.outfit v1 (M5 C-1; read-only, one
+    // optional validated repository id) are executable; player.outfit.set v1 is reserved
     // (documented, decoded, never executed) and any other name/version is unknown.
     enum class Entry
     {
         Unknown,
         RelayProbe1,
+        RelayInspectOutfit1,
         PlayerOutfitSet1Reserved,
     };
 
@@ -117,6 +136,13 @@ namespace CommandProtocol
         int64_t integer = 0;
         double number = 0.0;
         std::string text; // truncated to k_MaxObservedTextBytes on encoding
+
+        // M5 C-1: when set, the entry encodes as an object {"status":..,"value":..,"reason":..}
+        // (value only when the status is Observed and the kind is not Null; reason only when not
+        // empty, truncated to k_MaxObservedReasonBytes). Unset: the plain scalar, as relay.probe
+        // has always encoded it.
+        std::optional<FieldStatus> field_status;
+        std::string field_reason;
     };
 
     struct Result

@@ -23,11 +23,22 @@ public:
     static constexpr size_t k_Capacity = 8;
     static constexpr size_t k_DedupWindow = 64;
 
+    // M5 C-1: what the frame thread last published for the network thread to copy at receipt.
+    // The network thread never reads the engine; it stamps a command with this copy under the
+    // same lock that enqueues it, so the two cannot interleave with a frame-thread update. The
+    // result reports the copy as "at receipt", never as a fresh engine read.
+    struct FrameSnapshot
+    {
+        std::optional<std::string> mission_generation; // the edge-cached generation
+        uint64_t relay_transition_epoch = 0;           // the Relay-authored epoch (see GlacierRelay)
+    };
+
     struct Pending
     {
         CommandProtocol::Command command;
         uint64_t received_mono_ms = 0;
         uint64_t link_generation = 0; // the generation the link held when the command arrived
+        FrameSnapshot at_receipt;     // the frame thread's last published snapshot, copied at receipt
     };
 
     enum class PushOutcome
@@ -89,16 +100,19 @@ public:
             return s_Result;
         }
 
-        m_Queue.push_back(Pending{p_Command, p_NowMs, p_LinkGeneration});
+        m_Queue.push_back(Pending{p_Command, p_NowMs, p_LinkGeneration, m_Snapshot});
         Remember(Known{p_Command.command_id, p_LinkGeneration, false, CommandProtocol::Status::Received});
         ++m_Stats.pushed;
         return s_Result;
     }
 
-    // The scheduler's one command for this frame, if any.
-    std::optional<Pending> Pop()
+    // The scheduler's one command for this frame, if any. The frame thread publishes its
+    // snapshot in the same lock, so a command pushed after this frame's pop is stamped with this
+    // frame's values and nothing older.
+    std::optional<Pending> Pop(const FrameSnapshot& p_Snapshot)
     {
         std::lock_guard<std::mutex> s_Lock(m_Mutex);
+        m_Snapshot = p_Snapshot;
 
         if (m_Queue.empty())
             return std::nullopt;
@@ -107,6 +121,23 @@ public:
         m_Queue.pop_front();
         ++m_Stats.popped;
         return s_Pending;
+    }
+
+    std::optional<Pending> Pop() { return Pop(FrameSnapshot{}); }
+
+    // The frame thread's publication without a pop (the plugin publishes every frame through Pop;
+    // this exists for the probe and tests).
+    void PublishSnapshot(const FrameSnapshot& p_Snapshot)
+    {
+        std::lock_guard<std::mutex> s_Lock(m_Mutex);
+        m_Snapshot = p_Snapshot;
+    }
+
+    // How many commands are waiting (the plugin reads the engine for an inspection only when one is).
+    size_t Waiting() const
+    {
+        std::lock_guard<std::mutex> s_Lock(m_Mutex);
+        return m_Queue.size();
     }
 
     // Records the terminal state of an id so a later duplicate is answered as such.
@@ -182,4 +213,5 @@ private:
     std::deque<Pending> m_Queue;
     std::deque<Known> m_Recent;
     Stats m_Stats;
+    FrameSnapshot m_Snapshot; // the frame thread's last publication (M5 C-1)
 };

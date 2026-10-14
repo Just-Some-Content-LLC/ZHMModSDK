@@ -21,10 +21,16 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/IRelaySink.h
         Src/Json.cpp
         Src/Json.h
+        Src/LifecycleTee.cpp
+        Src/LifecycleTee.h
         Src/LogRelaySink.cpp
         Src/LogRelaySink.h
         Src/MissionObserver.cpp
         Src/MissionObserver.h
+        Src/OutfitObservation.cpp
+        Src/OutfitObservation.h
+        Src/PreconditionEvaluator.cpp
+        Src/PreconditionEvaluator.h
         Src/RelayAdapter.cpp
         Src/RelayAdapter.h
         Src/RelayEnvelope.cpp
@@ -78,6 +84,7 @@ add_executable(GlacierRelayTests
         Tests/CommandProtocolTests.cpp
         Tests/CommandQueueTests.cpp
         Tests/CommandSchedulerTests.cpp
+        Tests/OutfitInspectionTests.cpp
         Tests/TestListener.h
         Tests/ContractLifecycleTests.cpp
         Tests/DisguiseTelemetryTests.cpp

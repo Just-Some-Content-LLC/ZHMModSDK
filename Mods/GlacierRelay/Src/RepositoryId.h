@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 // A repository id as the relay owns it: the four fields of a Microsoft-layout GUID, which is what
 // the engine's ZRepositoryID (a ZGuid) holds. The Glacier-facing intake copies the fields out of the
@@ -31,6 +32,15 @@ struct RepositoryId
     // The dashed lowercase form, exactly k_TextLength characters:
     // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (data1-data2-data3-data4[0..1]-data4[2..7]).
     std::string ToDashedLowercase() const;
+
+    // The inverse of ToDashedLowercase (M5 C-1): exactly 36 characters, lowercase hex and dashes
+    // in the dashed positions; anything else is false and p_Out is untouched. Field semantics are
+    // the same, so FromDashedLowercase(ToDashedLowercase(x)) == x.
+    static bool FromDashedLowercase(std::string_view p_Text, RepositoryId& p_Out);
+
+    // The little-endian memory image (the inverse of FromLittleEndianBytes), for byte comparison
+    // with an engine value without constructing an engine type.
+    std::array<uint8_t, k_Bytes> ToLittleEndianBytes() const;
 
     bool operator==(const RepositoryId&) const = default;
 };
