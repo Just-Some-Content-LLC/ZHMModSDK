@@ -304,6 +304,8 @@ void RunCommandLinkTests()
         }
         CHECK(Field(s_Hello, "command_protocol_version") == "2" && Field(s_Hello, "kind") == "hello");
         CHECK(s_Hello.find("\"player.outfit.set/2\"") != std::string::npos && s_Hello.find("\"relay.inspect.outfit/1\"") != std::string::npos);
+        // M6-B1: the two read-only entries are claimed in the hello regardless of the effectful setting.
+        CHECK(s_Hello.find("\"relay.inspect.players/1\"") != std::string::npos && s_Hello.find("\"relay.inspect.entity/1\"") != std::string::npos);
         CHECK(s_Hello.find(s_Token) == std::string::npos);
 
         s_Beam.Send(CommandTest::WelcomeV2(1, s_Nonce1));

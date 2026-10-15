@@ -193,6 +193,115 @@ void CommandScheduler::Inspect(const CommandQueue::Pending& p_Pending, const Fra
         p_Result.reason = "engine reads unsupported on this frame source; frame values only";
 }
 
+// M6-B1: the plain frame values both inspections share, in a fixed order, before the reads.
+namespace
+{
+    void AppendFrameValues(CommandProtocol::Result& p_Result, const CommandScheduler::FrameObservation& p_Frame, uint64_t p_Age)
+    {
+        using OutfitObservation::Append;
+        using OutfitObservation::Field;
+        auto& s_Out = p_Result.observed;
+        Append(s_Out, "mission_playing", Field<bool>::Observed(p_Frame.mission_playing));
+        Append(s_Out, "scene_type", p_Frame.scene_available ? Field<std::string>::Observed(p_Frame.scene.scene_type) : Field<std::string>::Of(FieldStatus::Unavailable, "scene state unavailable"));
+        Append(s_Out, "receipt_to_frame_ms", Field<int64_t>::Observed(static_cast<int64_t>(p_Age)));
+    }
+}
+
+// Two stages. First the per-field reasons go (every field keeps its status and value; a
+// "reasons_dropped" marker says so), which is what an all-unavailable registry needs; only if the
+// line still does not fit are entries dropped from the end, with an "observed_reduced" marker. The
+// result's own reason is extended, never replaced.
+bool CommandScheduler::ReduceToFit(Result& p_Result)
+{
+    if (CommandProtocol::EncodeResult(p_Result).size() <= CommandProtocol::k_MaxLineBytes)
+        return false;
+
+    const auto s_Extend = [&](const char* p_Note) {
+        if (p_Result.reason.empty())
+            p_Result.reason = p_Note;
+        else
+            p_Result.reason += std::string("; ") + p_Note;
+    };
+
+    for (auto& s_Entry : p_Result.observed)
+        s_Entry.second.field_reason.clear();
+
+    if (p_Result.observed.size() < CommandProtocol::k_MaxObservedEntries)
+        p_Result.observed.emplace_back("reasons_dropped", Bool(true));
+
+    if (CommandProtocol::EncodeResult(p_Result).size() <= CommandProtocol::k_MaxLineBytes)
+    {
+        s_Extend("field reasons dropped to fit the result line bound");
+        return true;
+    }
+
+    if (!p_Result.observed.empty() && p_Result.observed.back().first == "reasons_dropped")
+        p_Result.observed.pop_back();
+
+    while (!p_Result.observed.empty() && CommandProtocol::EncodeResult(p_Result).size() + 32 > CommandProtocol::k_MaxLineBytes)
+        p_Result.observed.pop_back();
+
+    p_Result.observed.emplace_back("observed_reduced", Bool(true));
+    s_Extend("inspection reduced to fit the result line bound");
+    return true;
+}
+
+// relay.inspect.players v1 (M6-B1): no engine write; the registry's four declared slots, the three
+// words at 0x390 classified, and slot 0 through M5's local-hero path, each field with its status.
+void CommandScheduler::InspectPlayers(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, Result& p_Result)
+{
+    using OutfitObservation::Append;
+    using OutfitObservation::Field;
+
+    const uint64_t s_Age = p_Frame.now_mono_ms >= p_Pending.received_mono_ms ? p_Frame.now_mono_ms - p_Pending.received_mono_ms : 0;
+    const bool s_HaveInspector = static_cast<bool>(p_Frame.players_inspector);
+
+    PlayerObservation::RegistryReads s_Reads = s_HaveInspector
+        ? p_Frame.players_inspector()
+        : PlayerObservation::AllRegistry(FieldStatus::Unsupported, "no inspector on this frame source");
+
+    AppendFrameValues(p_Result, p_Frame, s_Age);
+    PlayerObservation::AppendRegistry(p_Result.observed, s_Reads);
+    Append(p_Result.observed, "reads_on_frame", s_HaveInspector ? Field<bool>::Observed(s_Reads.thread_id == p_Frame.thread_id) : Field<bool>::Of(FieldStatus::Unsupported, "no inspector"));
+
+    p_Result.status = Status::Applied;
+    if (!s_HaveInspector)
+        p_Result.reason = "engine reads unsupported on this frame source; frame values only";
+}
+
+// relay.inspect.entity v1 (M6-B1): no engine write; the loaded-brick inventory, the local hero's
+// authored identity and raw transform, the blueprint-factory round trip on the hero and the
+// candidate (the historical hitmen.brick / Agent48 by default; expected absent without content).
+void CommandScheduler::InspectEntity(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, Result& p_Result)
+{
+    using OutfitObservation::Append;
+    using OutfitObservation::Field;
+
+    const uint64_t s_Age = p_Frame.now_mono_ms >= p_Pending.received_mono_ms ? p_Frame.now_mono_ms - p_Pending.received_mono_ms : 0;
+    const bool s_HaveInspector = static_cast<bool>(p_Frame.entity_inspector);
+
+    PlayerObservation::EntityQuery s_Query;
+    for (const auto& s_Param : p_Pending.command.params)
+    {
+        if (s_Param.first == "brick")
+            s_Query.brick = s_Param.second;
+        else if (s_Param.first == "entity_id")
+            s_Query.entity_id = s_Param.second;
+    }
+
+    PlayerObservation::EntityReads s_Reads = s_HaveInspector
+        ? p_Frame.entity_inspector(s_Query)
+        : PlayerObservation::AllEntity(FieldStatus::Unsupported, "no inspector on this frame source", s_Query);
+
+    AppendFrameValues(p_Result, p_Frame, s_Age);
+    PlayerObservation::AppendEntity(p_Result.observed, s_Reads);
+    Append(p_Result.observed, "reads_on_frame", s_HaveInspector ? Field<bool>::Observed(s_Reads.thread_id == p_Frame.thread_id) : Field<bool>::Of(FieldStatus::Unsupported, "no inspector"));
+
+    p_Result.status = Status::Applied;
+    if (!s_HaveInspector)
+        p_Result.reason = "engine reads unsupported on this frame source; frame values only";
+}
+
 bool CommandScheduler::Tick(const FrameObservation& p_Frame)
 {
     ++m_Stats.frames;
@@ -297,6 +406,32 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
                 s_Result.reason = "inspection reduced to fit the result line bound";
             }
 
+            m_Queue.MarkDone(s_Command.command_id, s_Pending->link_generation, Status::Applied);
+            m_Emit(s_Result);
+            return true;
+        }
+
+        case CommandProtocol::Entry::RelayInspectPlayers1:
+        case CommandProtocol::Entry::RelayInspectEntity1:
+        {
+            // M6-B1: no engine write. The reads happen here, on this frame, through the inspector.
+            const bool s_Players = s_Command.entry == CommandProtocol::Entry::RelayInspectPlayers1;
+            if (s_Players)
+                ++m_Stats.players_inspected;
+            else
+                ++m_Stats.entities_inspected;
+            m_Stats.last_executed_frame = p_Frame.frame;
+            m_Stats.last_latency_ms = s_Age;
+            if (s_Age > m_Stats.max_latency_ms)
+                m_Stats.max_latency_ms = s_Age;
+
+            if (s_Players)
+                InspectPlayers(*s_Pending, p_Frame, s_Result);
+            else
+                InspectEntity(*s_Pending, p_Frame, s_Result);
+
+            if (ReduceToFit(s_Result))
+                ++m_Stats.reduced;
             m_Queue.MarkDone(s_Command.command_id, s_Pending->link_generation, Status::Applied);
             m_Emit(s_Result);
             return true;

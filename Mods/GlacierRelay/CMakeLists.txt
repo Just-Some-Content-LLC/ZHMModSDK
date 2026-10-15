@@ -34,6 +34,8 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/OutfitApply.h
         Src/OutfitObservation.cpp
         Src/OutfitObservation.h
+        Src/PlayerObservation.cpp
+        Src/PlayerObservation.h
         Src/PreconditionEvaluator.cpp
         Src/PreconditionEvaluator.h
         Src/RelayAdapter.cpp
@@ -94,6 +96,7 @@ add_executable(GlacierRelayTests
         Tests/CommandSchedulerTests.cpp
         Tests/OutfitApplyTests.cpp
         Tests/OutfitInspectionTests.cpp
+        Tests/PlayerInspectionTests.cpp
         Tests/TestListener.h
         Tests/ContractLifecycleTests.cpp
         Tests/DisguiseTelemetryTests.cpp

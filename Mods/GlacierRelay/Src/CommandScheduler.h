@@ -9,6 +9,7 @@
 #include "CommandQueue.h"
 #include "IOutfitApplier.h"
 #include "OutfitObservation.h"
+#include "PlayerObservation.h"
 #include "PreconditionEvaluator.h"
 #include "SceneState.h"
 
@@ -34,6 +35,13 @@ public:
     // performs the guarded engine reads of this frame and returns their plain values. Null in
     // tests and in the probe's default mode, which report the engine reads as unsupported.
     using Inspector = std::function<OutfitObservation::EngineReads(const std::optional<std::string>& p_CandidateId)>;
+
+    // M6-B1: the two read-only inspections of the player registry and of the local hero's authored
+    // identity (relay.inspect.players / relay.inspect.entity). Same rule as the outfit inspector:
+    // guarded engine reads on this frame only, nothing cached, null in tests and in the probe's
+    // default mode (reported as unsupported).
+    using PlayersInspector = std::function<PlayerObservation::RegistryReads()>;
+    using EntityInspector = std::function<PlayerObservation::EntityReads(const PlayerObservation::EntityQuery& p_Query)>;
 
     struct FrameObservation
     {
@@ -65,6 +73,10 @@ public:
         // the frame's copy is used, which only the tests do).
         OutfitApply::IOutfitApplier* applier = nullptr;
         std::function<uint64_t()> link_generation_now;
+
+        // M6-B1 (null: the registry and entity reads are unsupported on this frame source).
+        PlayersInspector players_inspector;
+        EntityInspector entity_inspector;
     };
 
     struct Stats
@@ -82,6 +94,9 @@ public:
         uint64_t outfit_changed = 0;     // classified changed
         uint64_t outfit_not_applied = 0; // precondition_failed or unavailable
         uint64_t outfit_uncertain = 0;   // classified uncertain (incl. faults)
+        // M6-B1
+        uint64_t players_inspected = 0;  // relay.inspect.players applied
+        uint64_t entities_inspected = 0; // relay.inspect.entity applied
         uint32_t first_thread_id = 0;
         uint32_t last_thread_id = 0;
         bool thread_changed = false; // the scheduler was invoked from more than one thread
@@ -103,10 +118,18 @@ public:
 
     Stats GetStats() const { return m_Stats; }
 
+    // M6-B1: drops observed entries from the end (and every reason) until the encoded line fits
+    // the protocol's bound, then marks the result reduced. Returns true when a reduction happened.
+    // Static and public so the bound is testable without a frame source.
+    static bool ReduceToFit(CommandProtocol::Result& p_Result);
+
 private:
     CommandProtocol::Result Base(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame) const;
     void Inspect(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
     void ApplyOutfit(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
+    // M6-B1
+    void InspectPlayers(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
+    void InspectEntity(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
 
 private:
     CommandQueue& m_Queue;

@@ -6,6 +6,7 @@
 #include "Glacier/ZEntity.h"
 
 #include "OutfitObservation.h"
+#include "PlayerObservation.h"
 #include "SceneState.h"
 
 class ZHitman5;
@@ -43,4 +44,22 @@ namespace SceneObservation
     // retained across frames, and no engine pointer leaves this function — except, for the outfit
     // applier only (M5 C-2B), into p_Handles when given.
     OutfitObservation::EngineReads ObserveOutfit(const std::optional<std::string>& p_CandidateId, OutfitHandles* p_Handles = nullptr);
+
+    // M6-B1 (relay.inspect.players): the player registry as declared by the SDK, read on this frame
+    // only — the three words at 0x390 classified against the inline slots (never interpreted as the
+    // SDK's array model, which experiment 4 showed wrong on this build), the four inline slots' plain
+    // fields, the ZHitman5 interface resolution of each slot's reference, and slot 0 through M5's
+    // own local-hero path (its current kit id) beside the registry's outfit guid. No write, no
+    // cache, no pointer leaves this function.
+    PlayerObservation::RegistryReads ObservePlayers();
+
+    // M6-B1 (relay.inspect.entity): the loaded-brick inventory (bounded), the local hero's authored
+    // identity (entity id, flags, owning brick, character guid, initial outfit, invincibility) and
+    // its stored transform with the dirty flag (never through the refreshing getter), the
+    // blueprint-factory round trip of the hero through its owning entity, and the candidate brick /
+    // authored entity (the historical hitmen.brick / Agent48 by default) with the same lookup. The
+    // only engine calls are the SDK-declared virtual lookups on a blueprint factory
+    // (GetSubEntitiesCount / GetSubEntityIndex / GetSubEntity), each reached only after a null and
+    // a type check. No write, no cache, no pointer leaves this function.
+    PlayerObservation::EntityReads ObserveEntity(const PlayerObservation::EntityQuery& p_Query);
 }

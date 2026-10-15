@@ -325,7 +325,7 @@ bool CommandLink::Handshake()
     s_Hello.protocol_version = m_Version;
     s_Hello.adapter_instance_id = m_AdapterInstanceId;
     s_Hello.native_at = UtcNowText();
-    s_Hello.capabilities = {"relay.probe/1", "relay.inspect.outfit/1"};
+    s_Hello.capabilities = {"relay.probe/1", "relay.inspect.outfit/1", "relay.inspect.players/1", "relay.inspect.entity/1"};
     if (m_Options.effectful)
         s_Hello.capabilities.push_back("player.outfit.set/2");
 

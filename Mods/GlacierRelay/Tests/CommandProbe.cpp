@@ -9,7 +9,7 @@
 // every value the probe's inspector or applier reports is scripted here and is never an observation
 // of HITMAN; the DLL's SceneObservation and OutfitApplier are not linked into this executable.
 //
-//   GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [scene] [inert|effectful] [apply-mode]
+//   GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [scene] [inert|effectful] [apply-mode] [players-mode]
 //
 // scene: "menu" (default; scene available, not playing, no hero), "mission" (available, playing,
 // a fake generation, a fake hero outfit and a fake kit table), "unavailable" (scene state not
@@ -34,6 +34,16 @@
 // or fewer bytes than requested — and accepts every later line; every other line is passed
 // through to a probe-owned file, so the production logging contract is exercised unchanged and
 // the second effectful command of a scenario proves the refusal does not latch).
+// players-mode (M6-B1): the FAKE registry, brick, entity and transform state the two read-only
+// inspections report (relay.inspect.players / relay.inspect.entity). "default" (slot 0 occupied with a
+// fake hero whenever the scene has one, slots 1-3 empty, 5 fake bricks at the menu and 23 in a
+// mission, the hero owned by a fake brick, the round trip returning the hero, the candidate brick
+// absent), "registry-unavailable", "layout-unsupported", "extra-slot" (slot 1 occupied too),
+// "hero-missing" (slot 0 has an entity reference but no hero interface), "candidate-present" (the
+// candidate brick and its authored entity resolve, distinct from the local hero), "roundtrip-different",
+// "roundtrip-unrepresentable" (index -1), "factory-mismatch", "subentity-missing", "bricks-empty",
+// "bricks-oversized" (70), "dirty-transform", "invalid-flags" (predeleted). Every value is scripted
+// here and is never an observation of HITMAN.
 // Exit code 0 when the link connected and was welcomed at least once.
 
 #include <Windows.h>
@@ -49,6 +59,7 @@
 #include "CommandQueue.h"
 #include "CommandScheduler.h"
 #include "FakeOutfitApplier.h"
+#include "PlayerObservation.h"
 #include "RelayAdapter.h"
 #include "RelayLog.h"
 
@@ -144,6 +155,224 @@ namespace
         }
 
         s_Reads.set_outfit_available = Field<bool>::Observed(p_World.setter_available);
+        return s_Reads;
+    }
+
+    // ---- M6-B1: the FAKE registry and entity state the two read-only inspections report -------------
+    // Plain values scripted per players-mode. Never an observation of HITMAN; no pointer exists here.
+    constexpr const char* k_FakeHeroEntityId = "feed9a0d70d546f4";     // a FAKE authored id for the local hero
+    constexpr const char* k_FakeHeroBrick = "0012e5a7b1c9d3ee";        // a FAKE loaded brick that owns the hero
+    constexpr const char* k_FakeHitmenBrick = "007c57a6ea581f8c";      // a FAKE stand-in for the historical brick id
+    constexpr const char* k_FakeAgent48 = "feede715906f747f";          // the historical authored id, used as a FAKE lookup key
+    constexpr const char* k_FakeCharacterId = "787c1ff2-467c-421d-98f4-6bbb92e5fc99";
+    constexpr const char* k_FakeZeros = "00000000-0000-0000-0000-000000000000";
+
+    PlayerObservation::SlotReads FakeEmptySlot()
+    {
+        using OutfitObservation::Field;
+        using CommandProtocol::FieldStatus;
+        PlayerObservation::SlotReads s_Slot;
+        s_Slot.player_id = Field<int64_t>::Observed(-1);
+        s_Slot.local_flag = Field<bool>::Observed(true);
+        s_Slot.connected_flag = Field<bool>::Observed(false);
+        s_Slot.net_player = Field<bool>::Observed(false);
+        s_Slot.replica = Field<bool>::Observed(false);
+        s_Slot.entity_present = Field<bool>::Observed(false);
+        s_Slot.hero_resolved = Field<bool>::Of(FieldStatus::Unavailable, "entity reference null");
+        s_Slot.flags_a0 = Field<int64_t>::Observed(-1);
+        s_Slot.session_id = Field<std::string>::Of(FieldStatus::Unavailable, "session id empty");
+        s_Slot.outfit_id = Field<std::string>::Observed(k_FakeZeros);
+        s_Slot.character_id = Field<std::string>::Observed(k_FakeZeros);
+        return s_Slot;
+    }
+
+    PlayerObservation::RegistryReads FakePlayers(const FakeWorld& p_World, const FakeOutfit::World& p_Outfit, const std::string& p_Mode)
+    {
+        using OutfitObservation::Field;
+        using CommandProtocol::FieldStatus;
+
+        if (p_Mode == "registry-unavailable")
+        {
+            auto s_Reads = PlayerObservation::AllRegistry(FieldStatus::Unavailable, "fake registry global null");
+            s_Reads.registry_available = Field<bool>::Observed(false);
+            s_Reads.thread_id = GetCurrentThreadId();
+            return s_Reads;
+        }
+
+        if (p_Mode == "layout-unsupported")
+        {
+            auto s_Reads = PlayerObservation::AllRegistry(FieldStatus::Unsupported, "fake registry layout unsupported");
+            s_Reads.registry_available = Field<bool>::Observed(true);
+            s_Reads.thread_id = GetCurrentThreadId();
+            return s_Reads;
+        }
+
+        PlayerObservation::RegistryReads s_Reads;
+        s_Reads.thread_id = GetCurrentThreadId();
+        s_Reads.registry_available = Field<bool>::Observed(true);
+        s_Reads.words = Field<std::string>::Observed("slot0,0,0x4000000000000101");
+        for (auto& s_Slot : s_Reads.slots)
+            s_Slot = FakeEmptySlot();
+
+        // slot 0: the fake local player (a hero whenever the scripted scene has one; in a mission the
+        // registry's session id and outfit guid; at the menu neither, as experiment 4 saw)
+        auto& s_Local = s_Reads.slots[0];
+        s_Local.player_id = Field<int64_t>::Observed(0);
+        s_Local.flags_a0 = Field<int64_t>::Observed(0);
+        s_Local.entity_present = Field<bool>::Observed(true);
+        s_Local.hero_resolved = Field<bool>::Observed(p_Mode != "hero-missing");
+        if (p_World.playing)
+        {
+            s_Local.session_id = p_World.registry_generation.empty() ? Field<std::string>::Of(FieldStatus::Unavailable, "session id empty") : Field<std::string>::Observed(p_World.registry_generation);
+            s_Local.outfit_id = Field<std::string>::Observed(p_Outfit.hero_outfit_id);
+        }
+
+        if (p_Mode == "extra-slot")
+        {
+            auto& s_Extra = s_Reads.slots[1];
+            s_Extra.player_id = Field<int64_t>::Observed(2);
+            s_Extra.flags_a0 = Field<int64_t>::Observed(0);
+            s_Extra.entity_present = Field<bool>::Observed(true);
+            s_Extra.hero_resolved = Field<bool>::Observed(true);
+            s_Extra.net_player = Field<bool>::Observed(true);
+            s_Extra.connected_flag = Field<bool>::Observed(true);
+            s_Extra.character_id = Field<std::string>::Observed(k_FakeCharacterId);
+        }
+
+        if (p_Mode == "hero-missing")
+        {
+            s_Reads.hero_kit_id = Field<std::string>::Of(FieldStatus::Unavailable, "hero interface not resolved");
+            s_Reads.slot0_matches_m5 = Field<bool>::Of(FieldStatus::Unavailable, "kit id or registry outfit guid unavailable");
+        }
+        else
+        {
+            s_Reads.hero_kit_id = Field<std::string>::Observed(p_Outfit.hero_outfit_id);
+            s_Reads.slot0_matches_m5 = Field<bool>::Observed(p_World.playing);
+        }
+
+        return s_Reads;
+    }
+
+    PlayerObservation::EntityIdentity FakeIdentity(const char* p_EntityId, const char* p_Brick, double p_X, double p_Y, double p_Z, const std::string& p_Mode)
+    {
+        using OutfitObservation::Field;
+        PlayerObservation::EntityIdentity s_Identity;
+        const bool s_Predeleted = p_Mode == "invalid-flags";
+        s_Identity.resolved = Field<bool>::Observed(true);
+        s_Identity.entity_id = Field<std::string>::Observed(p_EntityId);
+        s_Identity.entity_flags = Field<int64_t>::Observed(s_Predeleted ? 10 : 7);
+        s_Identity.activated = Field<bool>::Observed(!s_Predeleted);
+        s_Identity.predeleted = Field<bool>::Observed(s_Predeleted);
+        s_Identity.owning_brick = Field<std::string>::Observed(p_Brick);
+        s_Identity.character_id = Field<std::string>::Observed(k_FakeCharacterId);
+        s_Identity.initial_outfit_id = Field<std::string>::Observed(FakeOutfit::World::k_FakeSuit);
+        s_Identity.invincible = Field<bool>::Observed(false);
+        s_Identity.x = Field<double>::Observed(p_X);
+        s_Identity.y = Field<double>::Observed(p_Y);
+        s_Identity.z = Field<double>::Observed(p_Z);
+        s_Identity.transform_dirty = Field<bool>::Observed(p_Mode == "dirty-transform");
+        s_Identity.room_behaviour = Field<int64_t>::Observed(1);
+        return s_Identity;
+    }
+
+    PlayerObservation::EntityReads FakeEntity(const FakeWorld& p_World, const std::string& p_Mode, const PlayerObservation::EntityQuery& p_Query)
+    {
+        using OutfitObservation::Field;
+        using CommandProtocol::FieldStatus;
+
+        PlayerObservation::EntityReads s_Reads;
+        s_Reads.thread_id = GetCurrentThreadId();
+
+        // the fake brick list: 5 at the menu, 23 in a mission (experiment 4's counts), or scripted
+        size_t s_BrickCount = p_World.playing ? 23 : 5;
+        if (p_Mode == "bricks-empty") s_BrickCount = 0;
+        if (p_Mode == "bricks-oversized") s_BrickCount = 70;
+        const bool s_CandidatePresent = p_Mode == "candidate-present";
+        const std::string s_Brick = p_Query.brick.value_or(k_FakeHitmenBrick);
+        const std::string s_EntityId = p_Query.entity_id.value_or(k_FakeAgent48);
+
+        s_Reads.bricks.count = Field<int64_t>::Observed(static_cast<int64_t>(s_BrickCount + (s_CandidatePresent ? 1 : 0)));
+        for (size_t i = 0; i < s_BrickCount && s_Reads.bricks.ids.size() < PlayerObservation::k_MaxBrickIds; ++i)
+        {
+            char s_Buffer[17] = {};
+            std::snprintf(s_Buffer, sizeof(s_Buffer), "00%014zx", i + 1);
+            s_Reads.bricks.ids.push_back(i == 1 ? std::string(k_FakeHeroBrick) : std::string(s_Buffer));
+        }
+        if (s_CandidatePresent && s_Reads.bricks.ids.size() < PlayerObservation::k_MaxBrickIds)
+            s_Reads.bricks.ids.push_back(s_Brick);
+        s_Reads.bricks.truncated = Field<bool>::Observed(s_BrickCount + (s_CandidatePresent ? 1 : 0) > PlayerObservation::k_MaxBrickIds);
+
+        // the local hero: present at the menu and in a mission (experiment 4, F5: a local player
+        // exists in the main menu), as the fake registry's slot 0 reports; absent only when scripted
+        if (p_Mode == "hero-missing")
+        {
+            PlayerObservation::MarkIdentity(s_Reads.hero, FieldStatus::Unavailable, "fake hero interface not resolved");
+            PlayerObservation::MarkLookup(s_Reads.round_trip, FieldStatus::Unavailable, "fake hero interface not resolved");
+        }
+        else
+        {
+            s_Reads.hero = FakeIdentity(k_FakeHeroEntityId, k_FakeHeroBrick, -0.035, -3.832, -0.413, p_Mode);
+            auto& s_Trip = s_Reads.round_trip;
+            s_Trip.owner_found = Field<bool>::Observed(true);
+            s_Trip.factory_available = Field<bool>::Observed(true);
+            s_Trip.factory_template = Field<bool>::Observed(p_Mode != "factory-mismatch");
+            if (p_Mode == "roundtrip-unrepresentable")
+            {
+                s_Reads.hero.owning_brick = Field<std::string>::Of(FieldStatus::Unavailable, "fake: no owning entity");
+                PlayerObservation::MarkLookup(s_Trip, FieldStatus::Unavailable, "fake: owner not found");
+                s_Trip.owner_found = Field<bool>::Observed(false);
+            }
+            else if (p_Mode == "factory-mismatch")
+            {
+                s_Trip.subentity_count = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+                s_Trip.index = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+                s_Trip.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+                s_Trip.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+            }
+            else if (p_Mode == "subentity-missing")
+            {
+                s_Trip.subentity_count = Field<int64_t>::Observed(2);
+                s_Trip.index = Field<int64_t>::Observed(-1);
+                s_Trip.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
+                s_Trip.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
+            }
+            else
+            {
+                s_Trip.subentity_count = Field<int64_t>::Observed(2);
+                s_Trip.index = Field<int64_t>::Observed(1);
+                s_Trip.resolved = Field<bool>::Observed(true);
+                s_Trip.same_entity = Field<bool>::Observed(p_Mode != "roundtrip-different");
+            }
+        }
+        s_Reads.round_trip_outcome = PlayerObservation::ClassifyRoundTrip(s_Reads.round_trip);
+
+        // the candidate
+        PlayerObservation::CandidateReads s_Candidate;
+        s_Candidate.brick_id = s_Brick;
+        s_Candidate.entity_id = s_EntityId;
+        if (s_CandidatePresent)
+        {
+            s_Candidate.brick_present = Field<bool>::Observed(true);
+            s_Candidate.lookup.owner_found = Field<bool>::Observed(true);
+            s_Candidate.lookup.factory_available = Field<bool>::Observed(true);
+            s_Candidate.lookup.factory_template = Field<bool>::Observed(true);
+            s_Candidate.lookup.subentity_count = Field<int64_t>::Observed(3);
+            s_Candidate.lookup.index = Field<int64_t>::Observed(0);
+            s_Candidate.lookup.resolved = Field<bool>::Observed(true);
+            s_Candidate.lookup.same_entity = Field<bool>::Observed(false);
+            s_Candidate.identity = FakeIdentity(s_EntityId.c_str(), s_Brick.c_str(), -40.99882, -24.293657, 0.4925565, p_Mode);
+            s_Candidate.hitman5_resolved = Field<bool>::Observed(true);
+            s_Candidate.spatial_resolved = Field<bool>::Observed(true);
+        }
+        else
+        {
+            s_Candidate.brick_present = Field<bool>::Observed(false);
+            PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, "candidate brick not loaded");
+            PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate brick not loaded");
+            s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
+            s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
+        }
+        s_Reads.candidate = s_Candidate;
         return s_Reads;
     }
 
@@ -275,7 +504,7 @@ int main(int p_Argc, char** p_Argv)
 {
     if (p_Argc < 4)
     {
-        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short]\n");
+        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short] [default|registry-unavailable|layout-unsupported|extra-slot|hero-missing|candidate-present|roundtrip-different|roundtrip-unrepresentable|factory-mismatch|subentity-missing|bricks-empty|bricks-oversized|dirty-transform|invalid-flags]\n");
         return 2;
     }
 
@@ -285,6 +514,7 @@ int main(int p_Argc, char** p_Argv)
     const std::string s_SceneMode = p_Argc > 4 ? p_Argv[4] : "menu";
     const bool s_Effectful = p_Argc > 5 && std::string(p_Argv[5]) == "effectful";
     const std::string s_ApplyMode = p_Argc > 6 ? p_Argv[6] : "ok";
+    const std::string s_PlayersMode = p_Argc > 7 ? p_Argv[7] : "default"; // M6-B1
 
     // The test token comes from the environment only (never a file, never an argument that a
     // transcript would show); it is never printed.
@@ -297,7 +527,8 @@ int main(int p_Argc, char** p_Argv)
     }
 
     const std::string s_Adapter = RelayAdapter::NewInstanceId();
-    RelayLog::Info("command probe: adapter instance {}, port {}, frame interval {} ms, duration {} ms, scene {}, {} , apply-mode {}, token {}, main thread {} (FAKE frame source, FAKE inspection data and FAKE applier; never HITMAN state)", s_Adapter, s_Port, s_Interval, s_Duration, s_SceneMode, s_Effectful ? "effectful" : "inert", s_ApplyMode, s_Token.empty() ? "absent (protocol version 1)" : "present (protocol version 2; not logged)", GetCurrentThreadId());
+    RelayLog::Info("command probe: adapter instance {}, port {}, frame interval {} ms, duration {} ms, scene {}, {} , apply-mode {}, players-mode {}, token {}, main thread {} (FAKE frame source, FAKE inspection data, FAKE registry/entity data and FAKE applier; never HITMAN state)", s_Adapter, s_Port, s_Interval, s_Duration, s_SceneMode, s_Effectful ? "effectful" : "inert", s_ApplyMode, s_PlayersMode, s_Token.empty() ? "absent (protocol version 1)" : "present (protocol version 2; not logged)", GetCurrentThreadId());
+    std::printf("command probe: players-mode %s (FAKE registry, brick, entity and transform data; never HITMAN state)\n", s_PlayersMode.c_str());
     std::printf("command probe: adapter instance %s, port %u, frame interval %u ms, duration %u ms, scene %s, %s, apply-mode %s, token %s, main thread %lu (fake frame source, fake inspection data and fake applier)\n", s_Adapter.c_str(), s_Port, s_Interval, s_Duration, s_SceneMode.c_str(), s_Effectful ? "effectful" : "inert", s_ApplyMode.c_str(), s_Token.empty() ? "absent (v1)" : "present (v2; not printed)", GetCurrentThreadId());
 
     // The stable rule scaled to the fake frame rate (the real rule is 1,000 ms and 60 frames):
@@ -453,6 +684,9 @@ int main(int p_Argc, char** p_Argv)
                 return s_Reads;
             };
             s_Observation.applier = s_Effectful ? &s_Applier : nullptr;
+            // M6-B1: the FAKE registry and entity readers (scripted per players-mode; never HITMAN state)
+            s_Observation.players_inspector = [&] { return FakePlayers(s_World, s_Applier.inner.world, s_PlayersMode); };
+            s_Observation.entity_inspector = [&](const PlayerObservation::EntityQuery& p_Query) { return FakeEntity(s_World, s_PlayersMode, p_Query); };
             s_Observation.link_generation_now = [&] { return s_Link.LinkGeneration(); };
 
             s_Link.SetMissionGeneration(s_Observation.mission_generation);
@@ -476,11 +710,11 @@ int main(int p_Argc, char** p_Argv)
         s_Stats.protocol_version, s_Stats.effectful ? 1 : 0, s_Stats.connects, s_Stats.disconnects, s_Stats.refusals, s_Stats.attests_sent, s_Stats.link_generation, s_Stats.lines_received, s_Stats.commands_queued, s_Stats.commands_busy, s_Stats.commands_duplicate, s_Stats.commands_rejected, s_Stats.protocol_violations, s_Stats.results_sent, s_Stats.cleared_on_disconnect, s_Stats.reconnect_waits, s_Stats.current_backoff_ms, s_Stats.stable_links, s_Stats.network_thread_id
     );
     std::printf(
-        "command probe: queue pushed %llu popped %llu busy %llu duplicates %llu cleared %llu remembered %zu; scheduler frames %llu executed %llu inspected %llu outfit dispatched %llu called %llu changed %llu not_applied %llu uncertain %llu reduced %llu expired %llu stale %llu rejected %llu first thread %lu last thread %lu changed %d last latency %llu ms max %llu ms; FAKE applier observes %d invokes %d readbacks %d latched %d\n",
-        s_Queued.pushed, s_Queued.popped, s_Queued.busy, s_Queued.duplicates, s_Queued.cleared, s_Queued.remembered, s_Scheduled.frames, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.outfit_not_applied, s_Scheduled.outfit_uncertain, s_Scheduled.reduced, s_Scheduled.expired, s_Scheduled.stale_generation, s_Scheduled.rejected, s_Scheduled.first_thread_id, s_Scheduled.last_thread_id, s_Scheduled.thread_changed ? 1 : 0, s_Scheduled.last_latency_ms, s_Scheduled.max_latency_ms,
+        "command probe: queue pushed %llu popped %llu busy %llu duplicates %llu cleared %llu remembered %zu; scheduler frames %llu executed %llu inspected %llu players_inspected %llu entities_inspected %llu outfit dispatched %llu called %llu changed %llu not_applied %llu uncertain %llu reduced %llu expired %llu stale %llu rejected %llu first thread %lu last thread %lu changed %d last latency %llu ms max %llu ms; FAKE applier observes %d invokes %d readbacks %d latched %d\n",
+        s_Queued.pushed, s_Queued.popped, s_Queued.busy, s_Queued.duplicates, s_Queued.cleared, s_Queued.remembered, s_Scheduled.frames, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.players_inspected, s_Scheduled.entities_inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.outfit_not_applied, s_Scheduled.outfit_uncertain, s_Scheduled.reduced, s_Scheduled.expired, s_Scheduled.stale_generation, s_Scheduled.rejected, s_Scheduled.first_thread_id, s_Scheduled.last_thread_id, s_Scheduled.thread_changed ? 1 : 0, s_Scheduled.last_latency_ms, s_Scheduled.max_latency_ms,
         s_Applier.inner.observes, s_Applier.inner.invokes, s_Applier.inner.readbacks, s_Applier.inner.Latched() ? 1 : 0
     );
-    RelayLog::Info("command probe: done after {} fake frames; connects {}, executed {}, inspected {}, outfit dispatched {} called {} changed {}, expired {}, violations {}", s_Frames, s_Stats.connects, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.expired, s_Stats.protocol_violations);
+    RelayLog::Info("command probe: done after {} fake frames; connects {}, executed {}, inspected {}, players inspected {}, entities inspected {}, outfit dispatched {} called {} changed {}, expired {}, violations {}", s_Frames, s_Stats.connects, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.players_inspected, s_Scheduled.entities_inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.expired, s_Stats.protocol_violations);
 
     return s_Stats.connects > 0 ? 0 : 1;
 }

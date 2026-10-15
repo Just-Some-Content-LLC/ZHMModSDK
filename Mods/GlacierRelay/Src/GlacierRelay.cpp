@@ -144,9 +144,9 @@ void GlacierRelay::OnEngineInitialized()
         });
 
         if (s_Command.effectful)
-            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1 (read-only) and player.outfit.set/2 (EFFECTFUL: one guarded ZHitman5_SetOutfit call behind the applying-frame gate), one command per frame; protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
+            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1, relay.inspect.entity/1 (read-only) and player.outfit.set/2 (EFFECTFUL: one guarded ZHitman5_SetOutfit call behind the applying-frame gate), one command per frame; protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
         else
-            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1 and relay.inspect.outfit/1 (read-only), one command per frame, no engine write ([command] effectful = false); protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
+            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1 and relay.inspect.entity/1 (read-only), one command per frame, no engine write ([command] effectful = false); protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
     }
     else
     {
@@ -324,6 +324,11 @@ void GlacierRelay::ScheduleCommand(const SceneState& p_Scene, bool p_PlayingBefo
     s_Observation.contract_ended_seen = m_ContractEndedSeen;
     s_Observation.inspector = [this](const std::optional<std::string>& p_CandidateId) { return InspectOutfit(p_CandidateId); };
 
+    // M6-B1: the two read-only inspectors, called by the scheduler on this frame only for the
+    // command taken this frame (never on an idle frame).
+    s_Observation.players_inspector = [this] { return InspectPlayers(); };
+    s_Observation.entity_inspector = [this](const PlayerObservation::EntityQuery& p_Query) { return InspectEntity(p_Query); };
+
     // M5 C-2B: the applier only when the effectful setting constructed it; the link generation
     // re-read immediately before any setter call.
     s_Observation.applier = m_OutfitApplier.get();
@@ -427,6 +432,49 @@ OutfitObservation::EngineReads GlacierRelay::InspectOutfit(const std::optional<s
     {
         m_RegistryChangeAdvanced = true;
         AdvanceEpoch("registry generation differs from the edge-cached generation on an inspection frame");
+    }
+
+    return s_Reads;
+}
+
+// M6-B1: the registry inspection under its own fault guard; a fault inside a read is logged with
+// the command's context and reported as unavailable rather than ending the frame.
+PlayerObservation::RegistryReads GlacierRelay::InspectPlayers()
+{
+    PlayerObservation::RegistryReads s_Reads;
+    bool s_Completed = false;
+
+    RelayLog::Guard("InspectPlayers", [&] {
+        s_Reads = SceneObservation::ObservePlayers();
+        s_Completed = true;
+    });
+
+    if (!s_Completed)
+    {
+        auto s_Faulted = PlayerObservation::AllRegistry(CommandProtocol::FieldStatus::Unavailable, "fault during the registry reads");
+        s_Faulted.thread_id = GetCurrentThreadId();
+        return s_Faulted;
+    }
+
+    return s_Reads;
+}
+
+// M6-B1: the entity inspection under its own fault guard, as above.
+PlayerObservation::EntityReads GlacierRelay::InspectEntity(const PlayerObservation::EntityQuery& p_Query)
+{
+    PlayerObservation::EntityReads s_Reads;
+    bool s_Completed = false;
+
+    RelayLog::Guard("InspectEntity", [&] {
+        s_Reads = SceneObservation::ObserveEntity(p_Query);
+        s_Completed = true;
+    });
+
+    if (!s_Completed)
+    {
+        auto s_Faulted = PlayerObservation::AllEntity(CommandProtocol::FieldStatus::Unavailable, "fault during the entity reads", p_Query);
+        s_Faulted.thread_id = GetCurrentThreadId();
+        return s_Faulted;
     }
 
     return s_Reads;

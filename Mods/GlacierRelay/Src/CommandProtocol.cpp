@@ -50,12 +50,28 @@ namespace CommandProtocol
             return Entry::PlayerOutfitSet1Reserved;
         if (p_Name == "player.outfit.set" && p_Version == 2)
             return Entry::PlayerOutfitSet2;
+        if (p_Name == "relay.inspect.players" && p_Version == 1)
+            return Entry::RelayInspectPlayers1;
+        if (p_Name == "relay.inspect.entity" && p_Version == 1)
+            return Entry::RelayInspectEntity1;
         return Entry::Unknown;
     }
 
     bool IsEffectful(Entry p_Entry)
     {
         return p_Entry == Entry::PlayerOutfitSet2;
+    }
+
+    bool ValidHex16(std::string_view p_Text)
+    {
+        if (p_Text.size() != 16)
+            return false;
+
+        for (const char c : p_Text)
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                return false;
+
+        return true;
     }
 
     bool ValidUuid(std::string_view p_Text)
@@ -294,6 +310,28 @@ namespace CommandProtocol
                         return Reject(s_Out, "unknown parameter: " + s_Field.first);
                     if (!IsText(&s_Field.second, 36) || !ValidUuid(s_Field.second.text))
                         return Reject(s_Out, "invalid parameter: " + s_Field.first);
+                    s_Command.params.emplace_back(s_Field.first, s_Field.second.text);
+                }
+                break;
+            }
+
+            case Entry::RelayInspectPlayers1:
+                // M6-B1: no parameters; the registry reads are fixed.
+                if (!s_Params->fields.empty())
+                    return Reject(s_Out, "unknown parameter: " + s_Params->fields.front().first);
+                break;
+
+            case Entry::RelayInspectEntity1:
+            {
+                // M6-B1: two optional, strictly validated 16-hex-digit ids (a brick's runtime resource
+                // id and an authored entity id); nothing else. No offset, no address, no pointer: the
+                // ids name content, and the reader resolves them through the SDK's declared lookups.
+                for (const auto& s_Field : s_Params->fields)
+                {
+                    if (s_Field.first != "brick" && s_Field.first != "entity_id")
+                        return Reject(s_Out, "unknown parameter: " + s_Field.first);
+                    if (!IsText(&s_Field.second, 16) || !ValidHex16(s_Field.second.text))
+                        return Reject(s_Out, "invalid parameter: " + s_Field.first + " (not 16 lowercase hex digits)");
                     s_Command.params.emplace_back(s_Field.first, s_Field.second.text);
                 }
                 break;

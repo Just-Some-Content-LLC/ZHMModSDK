@@ -62,6 +62,44 @@ void RunCommandProtocolTests()
         CHECK(Lookup("player.outfit.set", 1) == Entry::PlayerOutfitSet1Reserved);
         CHECK(Lookup("player.outfit.set", 2) == Entry::PlayerOutfitSet2 && IsEffectful(Entry::PlayerOutfitSet2) && !IsEffectful(Entry::PlayerOutfitSet1Reserved));
         CHECK(Lookup("game.time_scale.set", 1) == Entry::Unknown);
+
+        // M6-B1: the two read-only entries, inert, and the 16-hex-digit id rule.
+        CHECK(Lookup("relay.inspect.players", 1) == Entry::RelayInspectPlayers1 && !IsEffectful(Entry::RelayInspectPlayers1));
+        CHECK(Lookup("relay.inspect.entity", 1) == Entry::RelayInspectEntity1 && !IsEffectful(Entry::RelayInspectEntity1));
+        CHECK(Lookup("relay.inspect.players", 2) == Entry::Unknown && Lookup("relay.inspect.entity", 2) == Entry::Unknown);
+        CHECK(ValidHex16("007c57a6ea581f8c") && ValidHex16("feede715906f747f"));
+        CHECK(!ValidHex16("FEEDE715906F747F") && !ValidHex16("feede715906f747") && !ValidHex16("feede715906f747fa") && !ValidHex16("0xfeede715906f74") && !ValidHex16(""));
+    }
+
+    // --- M6-B1: relay.inspect.players takes no parameter; relay.inspect.entity two optional ids ---
+    {
+        auto s_Decode = [&](const std::string& p_LineWithNewline) {
+            std::string s_Line = p_LineWithNewline;
+            s_Line.pop_back();
+            return DecodeCommand(s_Line);
+        };
+
+        const auto s_Players = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.players", 1));
+        CHECK(s_Players.ok && s_Players.command.entry == Entry::RelayInspectPlayers1 && s_Players.command.params.empty());
+        const auto s_PlayersParam = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.players", 1, "{\"slot\":0}"));
+        CHECK(!s_PlayersParam.ok && Contains(s_PlayersParam.reason, "unknown parameter") && s_PlayersParam.command_id == s_Id);
+
+        const auto s_Entity = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.entity", 1));
+        CHECK(s_Entity.ok && s_Entity.command.entry == Entry::RelayInspectEntity1 && s_Entity.command.params.empty());
+        const auto s_Both = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.entity", 1, "{\"brick\":\"007c57a6ea581f8c\",\"entity_id\":\"feede715906f747f\"}"));
+        CHECK(s_Both.ok && s_Both.command.params.size() == 2 && s_Both.command.params[0].first == "brick" && s_Both.command.params[0].second == "007c57a6ea581f8c" && s_Both.command.params[1].second == "feede715906f747f");
+        const auto s_Upper = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.entity", 1, "{\"entity_id\":\"FEEDE715906F747F\"}"));
+        CHECK(!s_Upper.ok && Contains(s_Upper.reason, "invalid parameter: entity_id"));
+        const auto s_Address = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.entity", 1, "{\"address\":\"0x14313dac0\"}"));
+        CHECK(!s_Address.ok && Contains(s_Address.reason, "unknown parameter: address"));
+        const auto s_Number = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.entity", 1, "{\"brick\":1}"));
+        CHECK(!s_Number.ok && Contains(s_Number.reason, "invalid parameter: brick"));
+        // the entries decode on a version-2 link too, with the effectful setting off
+        DecodeOptions s_V2;
+        s_V2.protocol_version = 2;
+        std::string s_V2Line = CommandTest::Command(s_Id, 3, 500, "relay.inspect.players", 1, "{}", "{}", 2);
+        s_V2Line.pop_back();
+        CHECK(DecodeCommand(s_V2Line, s_V2).ok);
     }
 
     // --- a valid relay.probe command ----------------------------------------------------------------

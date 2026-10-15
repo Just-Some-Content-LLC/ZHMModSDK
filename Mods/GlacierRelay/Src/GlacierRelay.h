@@ -72,6 +72,11 @@ private:
     void OnContractLifecycle(LifecycleTee::Kind p_Kind, const std::string& p_ContractSessionId);
     OutfitObservation::EngineReads InspectOutfit(const std::optional<std::string>& p_CandidateId);
 
+    // M6-B1: the scheduler's two read-only inspectors (relay.inspect.players / relay.inspect.entity),
+    // guarded like InspectOutfit: a fault inside a read is logged and reported as unavailable.
+    PlayerObservation::RegistryReads InspectPlayers();
+    PlayerObservation::EntityReads InspectEntity(const PlayerObservation::EntityQuery& p_Query);
+
     DECLARE_PLUGIN_DETOUR(
         GlacierRelay, void, OnTelemetryEventSent, ZAchievementManagerSimple* th, uint32_t eventIndex,
         const ZDynamicObject& event

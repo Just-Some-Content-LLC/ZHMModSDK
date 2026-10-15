@@ -5,8 +5,14 @@
 #include <array>
 #include <cstring>
 
+#include <algorithm>
+#include <utility>
+#include <vector>
+
 #include "Functions.h"
 #include "Globals.h"
+#include "Glacier/CompileReflection.h"
+#include "Glacier/EntityFactory.h"
 #include "Glacier/Enums.h"
 #include "Glacier/ZApplicationEngineWin32.h"
 #include "Glacier/ZContentKitManager.h"
@@ -15,6 +21,7 @@
 #include "Glacier/ZOutfit.h"
 #include "Glacier/ZPlayerRegistry.h"
 #include "Glacier/ZScene.h"
+#include "Glacier/ZSpatialEntity.h"
 
 #include "RepositoryId.h"
 
@@ -271,5 +278,406 @@ OutfitObservation::EngineReads SceneObservation::ObserveOutfit(const std::option
     // 3. The setter's availability on this build: the resolved address exists or it does not.
     s_Reads.set_outfit_available = Field<bool>::Observed(Functions::ZHitman5_SetOutfit != nullptr && Functions::ZHitman5_SetOutfit->Exists());
 
+    return s_Reads;
+}
+
+// ---- M6-B1: the player-registry and entity inspections ------------------------------------------
+namespace
+{
+    using PlayerObservation::EntityIdentity;
+    using PlayerObservation::EntityReads;
+    using PlayerObservation::LookupFacts;
+    using PlayerObservation::RegistryReads;
+    using PlayerObservation::SlotReads;
+    using OutfitObservation::Field;
+    using OutfitObservation::FieldStatus;
+
+    static_assert(static_cast<int64_t>(ZEntityImpl::EEntityFlags::ENTITYFLAG_ACTIVATED) == PlayerObservation::k_FlagActivated, "ENTITYFLAG_ACTIVATED is expected to be 4");
+    static_assert(static_cast<int64_t>(ZEntityImpl::EEntityFlags::ENTITYFLAG_PREDELETED) == PlayerObservation::k_FlagPredeleted, "ENTITYFLAG_PREDELETED is expected to be 8");
+    static_assert(sizeof(ZGuid) == RepositoryId::k_Bytes, "ZGuid is expected to be 16 bytes");
+    static_assert(sizeof(ZPlayerRegistry::m_PlayerData) >= 3 * sizeof(uint64_t), "the three words at 0x390 lie inside the declared registry object");
+    static_assert(offsetof(ZPlayerRegistry, m_PlayerData) == 0x390, "the registry words are read at 0x390");
+
+    // The historical candidate: hitmen.brick and its authored hero (Agent48). Content, not a pointer.
+    const ZRuntimeResourceID k_HitmenBrick = ResId<"[assembly:/_sdk/hitmen.brick].pc_entitytype">;
+    constexpr uint64_t k_HitmenAgent48 = 0xfeede715906f747full;
+
+    // Any 16-byte engine guid rendered the way the telemetry intake renders disguise ids (the
+    // bytes copied out; never the engine's own string functions, which allocate).
+    std::string RenderGuid(const ZGuid& p_Guid)
+    {
+        std::array<uint8_t, RepositoryId::k_Bytes> s_Bytes{};
+        std::memcpy(s_Bytes.data(), &p_Guid, s_Bytes.size());
+        return RepositoryId::FromLittleEndianBytes(s_Bytes).ToDashedLowercase();
+    }
+
+    Field<std::string> ReadSessionField(const ZString& p_Text)
+    {
+        if (p_Text.size() == 0)
+            return Field<std::string>::Of(FieldStatus::Unavailable, "session id empty");
+        if (p_Text.size() > 256 || !p_Text.c_str())
+            return Field<std::string>::Of(FieldStatus::Unavailable, "session id implausible");
+        return Field<std::string>::Observed(std::string(p_Text.ToStringView()));
+    }
+
+    // A bounded copy of the loaded-brick list's ids and root references, valid for this frame only.
+    using BrickList = std::vector<std::pair<uint64_t, ZEntityRef>>;
+
+    void ReadBricks(const ZEntitySceneContext* p_Context, PlayerObservation::BrickReads& p_Out, BrickList& p_List)
+    {
+        if (!p_Context)
+        {
+            p_Out.count = Field<int64_t>::Of(FieldStatus::Unavailable, "scene context null");
+            p_Out.truncated = Field<bool>::Of(FieldStatus::Unavailable, "scene context null");
+            return;
+        }
+
+        const auto& s_Bricks = p_Context->m_aLoadedBricks;
+        const size_t s_Count = s_Bricks.size();
+        p_Out.count = Field<int64_t>::Observed(static_cast<int64_t>(s_Count));
+
+        const size_t s_Scanned = std::min(s_Count, PlayerObservation::k_MaxBricksScanned);
+        for (size_t i = 0; i < s_Scanned; ++i)
+        {
+            const uint64_t s_Id = s_Bricks[i].m_RuntimeResourceID.GetID();
+            p_List.emplace_back(s_Id, s_Bricks[i].m_EntityRef);
+            if (p_Out.ids.size() < PlayerObservation::k_MaxBrickIds)
+                p_Out.ids.push_back(PlayerObservation::Hex16(s_Id));
+        }
+
+        p_Out.truncated = Field<bool>::Observed(s_Count > PlayerObservation::k_MaxBrickIds);
+    }
+
+    // The owning entity named as a loaded brick's root, the scene root, or neither.
+    Field<std::string> BrickOf(const ZEntityRef& p_Owner, const ZEntitySceneContext* p_Context, const BrickList& p_Bricks)
+    {
+        for (const auto& s_Brick : p_Bricks)
+            if (s_Brick.second == p_Owner)
+                return Field<std::string>::Observed(PlayerObservation::Hex16(s_Brick.first));
+
+        if (p_Context && p_Context->m_pScene && p_Context->m_pScene.m_entityRef == p_Owner)
+            return Field<std::string>::Observed("scene");
+
+        return Field<std::string>::Of(FieldStatus::Unavailable, "owner is neither a loaded brick root nor the scene root");
+    }
+
+    // The identity fields of one entity reference, all inline reads of declared SDK memory: the
+    // entity type's authored id and the entity's flags, the owning entity's brick, the ZHitman5
+    // fields when the interface resolved, and the spatial entity's stored translation with its
+    // dirty flag (GetObjectToWorldMatrix is never called: it refreshes the engine's cache).
+    void FillIdentity(const ZEntityRef& p_Ref, ZHitman5* p_Hero, const ZEntitySceneContext* p_Context, const BrickList& p_Bricks, EntityIdentity& p_Out)
+    {
+        if (!p_Ref)
+        {
+            PlayerObservation::MarkIdentity(p_Out, FieldStatus::Unavailable, "entity reference null");
+            return;
+        }
+
+        const ZEntityImpl* s_Entity = p_Ref.GetEntity();
+        p_Out.resolved = Field<bool>::Observed(p_Hero != nullptr);
+
+        const ZEntityType* s_Type = s_Entity->GetType();
+        if (s_Type)
+            p_Out.entity_id = Field<std::string>::Observed(PlayerObservation::Hex16(s_Type->m_nEntityID));
+        else
+            p_Out.entity_id = Field<std::string>::Of(FieldStatus::Unavailable, "entity type null");
+
+        const int64_t s_Flags = static_cast<int64_t>(s_Entity->m_nEntityFlags);
+        p_Out.entity_flags = Field<int64_t>::Observed(s_Flags);
+        p_Out.activated = Field<bool>::Observed((s_Flags & PlayerObservation::k_FlagActivated) != 0);
+        p_Out.predeleted = Field<bool>::Observed((s_Flags & PlayerObservation::k_FlagPredeleted) != 0);
+
+        const ZEntityRef s_Owner = p_Ref.GetOwningEntity();
+        p_Out.owning_brick = s_Owner ? BrickOf(s_Owner, p_Context, p_Bricks) : Field<std::string>::Of(FieldStatus::Unavailable, "no owning entity");
+
+        if (p_Hero)
+        {
+            p_Out.character_id = Field<std::string>::Observed(RenderGuid(p_Hero->m_CharacterId));
+            p_Out.initial_outfit_id = Field<std::string>::Observed(RenderGuid(p_Hero->m_InitialOutfitId));
+            p_Out.invincible = Field<bool>::Observed(p_Hero->m_bIsInvincible);
+        }
+        else
+        {
+            p_Out.character_id = Field<std::string>::Of(FieldStatus::Unavailable, "hero interface not resolved");
+            p_Out.initial_outfit_id = Field<std::string>::Of(FieldStatus::Unavailable, "hero interface not resolved");
+            p_Out.invincible = Field<bool>::Of(FieldStatus::Unavailable, "hero interface not resolved");
+        }
+
+        const ZSpatialEntity* s_Spatial = p_Ref.QueryInterface<ZSpatialEntity>();
+        if (!s_Spatial)
+        {
+            p_Out.x = Field<double>::Of(FieldStatus::Unavailable, "spatial interface not resolved");
+            p_Out.y = Field<double>::Of(FieldStatus::Unavailable, "spatial interface not resolved");
+            p_Out.z = Field<double>::Of(FieldStatus::Unavailable, "spatial interface not resolved");
+            p_Out.transform_dirty = Field<bool>::Of(FieldStatus::Unavailable, "spatial interface not resolved");
+            p_Out.room_behaviour = Field<int64_t>::Of(FieldStatus::Unavailable, "spatial interface not resolved");
+            return;
+        }
+
+        p_Out.x = Field<double>::Observed(static_cast<double>(s_Spatial->m_mTransform.Trans.x));
+        p_Out.y = Field<double>::Observed(static_cast<double>(s_Spatial->m_mTransform.Trans.y));
+        p_Out.z = Field<double>::Observed(static_cast<double>(s_Spatial->m_mTransform.Trans.z));
+        p_Out.transform_dirty = Field<bool>::Observed(s_Spatial->m_bWorldTransformDirty != 0);
+        p_Out.room_behaviour = Field<int64_t>::Observed(static_cast<int64_t>(s_Spatial->m_eRoomBehaviour));
+    }
+
+    // The blueprint-factory lookup, each step its own boundary: the owner exists; its factory is
+    // non-null; the factory's vtable is the template entity blueprint factory's; the sub-entity count
+    // and the index of the authored id; the sub-entity at that index; its equality with the
+    // reference entity (pointer equality on this frame — an observation). The resolved reference is
+    // handed back for this frame's reads only.
+    void Lookup(const ZEntityRef& p_Owner, uint64_t p_EntityId, const ZEntityRef& p_Reference, LookupFacts& p_Out, ZEntityRef* p_Resolved)
+    {
+        p_Out.owner_found = Field<bool>::Observed(static_cast<bool>(p_Owner));
+        if (!p_Owner)
+        {
+            PlayerObservation::MarkLookup(p_Out, FieldStatus::Unavailable, "owner not found");
+            p_Out.owner_found = Field<bool>::Observed(false);
+            return;
+        }
+
+        ZEntityBlueprintFactoryBase* s_Factory = p_Owner.GetBlueprintFactory();
+        p_Out.factory_available = Field<bool>::Observed(s_Factory != nullptr);
+        if (!s_Factory)
+        {
+            p_Out.factory_template = Field<bool>::Of(FieldStatus::Unavailable, "blueprint factory null");
+            p_Out.subentity_count = Field<int64_t>::Of(FieldStatus::Unavailable, "blueprint factory null");
+            p_Out.index = Field<int64_t>::Of(FieldStatus::Unavailable, "blueprint factory null");
+            p_Out.resolved = Field<bool>::Of(FieldStatus::Unavailable, "blueprint factory null");
+            p_Out.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "blueprint factory null");
+            return;
+        }
+
+        const bool s_Template = s_Factory->IsTemplateEntityBlueprintFactory();
+        p_Out.factory_template = Field<bool>::Observed(s_Template);
+        if (!s_Template)
+        {
+            p_Out.subentity_count = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+            p_Out.index = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+            p_Out.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+            p_Out.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+            return;
+        }
+
+        p_Out.subentity_count = Field<int64_t>::Observed(s_Factory->GetSubEntitiesCount());
+        const int s_Index = s_Factory->GetSubEntityIndex(p_EntityId);
+        p_Out.index = Field<int64_t>::Observed(s_Index);
+        if (s_Index < 0)
+        {
+            p_Out.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
+            p_Out.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
+            return;
+        }
+
+        const ZEntityRef s_Sub(s_Factory->GetSubEntity(p_Owner.m_pObj, s_Index));
+        p_Out.resolved = Field<bool>::Observed(static_cast<bool>(s_Sub));
+        if (!s_Sub)
+        {
+            p_Out.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "sub-entity null at a valid index");
+            return;
+        }
+
+        if (p_Reference)
+            p_Out.same_entity = Field<bool>::Observed(s_Sub == p_Reference);
+        else
+            p_Out.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "local hero reference null");
+
+        if (p_Resolved)
+            *p_Resolved = s_Sub;
+    }
+}
+
+PlayerObservation::RegistryReads SceneObservation::ObservePlayers()
+{
+    const ZPlayerRegistry* s_Registry = Globals::PlayerRegistry;
+
+    if (!s_Registry)
+    {
+        RegistryReads s_None = PlayerObservation::AllRegistry(FieldStatus::Unavailable, "player registry global null");
+        s_None.registry_available = Field<bool>::Observed(false);
+        s_None.thread_id = GetCurrentThreadId();
+        return s_None;
+    }
+
+    RegistryReads s_Reads;
+    s_Reads.thread_id = GetCurrentThreadId();
+    s_Reads.registry_available = Field<bool>::Observed(true);
+
+    // The three words at 0x390 as values classified against the inline slots (experiment 4, F1).
+    const auto* s_Words = reinterpret_cast<const uint64_t*>(&s_Registry->m_PlayerData);
+    const uint64_t s_SlotsBase = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&s_Registry->m_aPlayerData[0]));
+    std::string s_Classified;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (i > 0)
+            s_Classified += ",";
+        s_Classified += PlayerObservation::ClassifyWord(s_Words[i], s_SlotsBase, sizeof(SNetPlayerData), PlayerObservation::k_SlotCount);
+    }
+    s_Reads.words = Field<std::string>::Observed(s_Classified);
+
+    ZHitman5* s_Slot0Hero = nullptr;
+
+    for (size_t i = 0; i < PlayerObservation::k_SlotCount; ++i)
+    {
+        const SNetPlayerData& s_Data = s_Registry->m_aPlayerData[i];
+        const ZNetPlayerController& s_Controller = s_Data.m_Controller;
+        SlotReads& s_Out = s_Reads.slots[i];
+
+        s_Out.player_id = Field<int64_t>::Observed(s_Data.m_nPlayerId);
+        s_Out.local_flag = Field<bool>::Observed(s_Controller.m_bLocalPlayer);
+        s_Out.connected_flag = Field<bool>::Observed(s_Controller.m_bConnectedToMultiplayer);
+        s_Out.net_player = Field<bool>::Observed(s_Controller.m_pNetPlayer != nullptr);
+        s_Out.replica = Field<bool>::Observed(s_Controller.m_pRakNetReplica != nullptr);
+
+        const ZEntityRef s_Ref = s_Controller.m_HitmanEntity;
+        s_Out.entity_present = Field<bool>::Observed(static_cast<bool>(s_Ref));
+
+        if (s_Ref)
+        {
+            const TEntityRef<ZHitman5> s_Hero(s_Ref);
+            s_Out.hero_resolved = Field<bool>::Observed(s_Hero.m_pInterfaceRef != nullptr);
+            if (i == 0)
+                s_Slot0Hero = s_Hero.m_pInterfaceRef;
+        }
+        else
+        {
+            s_Out.hero_resolved = Field<bool>::Of(FieldStatus::Unavailable, "entity reference null");
+        }
+
+        s_Out.flags_a0 = Field<int64_t>::Observed(static_cast<int64_t>(static_cast<int32_t>(s_Controller.m_nFlags0x98)));
+        s_Out.session_id = ReadSessionField(s_Controller.s_sSessionId);
+        s_Out.outfit_id = Field<std::string>::Observed(RenderGuid(s_Controller.m_OutfitId));
+        s_Out.character_id = Field<std::string>::Observed(RenderGuid(s_Controller.m_SelectedCharacterId));
+    }
+
+    // Slot 0 through M5's local-hero path (the same entity, the same frame): its current kit id.
+    if (!s_Slot0Hero)
+        s_Reads.hero_kit_id = Field<std::string>::Of(FieldStatus::Unavailable, "hero interface not resolved");
+    else if (!s_Slot0Hero->m_rOutfitKit || !s_Slot0Hero->m_rOutfitKit.m_pInterfaceRef)
+        s_Reads.hero_kit_id = Field<std::string>::Of(FieldStatus::Unavailable, "outfit kit reference null");
+    else
+        s_Reads.hero_kit_id = Field<std::string>::Observed(RenderId(s_Slot0Hero->m_rOutfitKit.m_pInterfaceRef->m_sId));
+
+    if (s_Reads.hero_kit_id.observed() && s_Reads.slots[0].outfit_id.observed())
+        s_Reads.slot0_matches_m5 = Field<bool>::Observed(*s_Reads.hero_kit_id.value == *s_Reads.slots[0].outfit_id.value);
+    else
+        s_Reads.slot0_matches_m5 = Field<bool>::Of(FieldStatus::Unavailable, "kit id or registry outfit guid unavailable");
+
+    return s_Reads;
+}
+
+PlayerObservation::EntityReads SceneObservation::ObserveEntity(const PlayerObservation::EntityQuery& p_Query)
+{
+    EntityReads s_Reads;
+    s_Reads.thread_id = GetCurrentThreadId();
+
+    const ZEntitySceneContext* s_Context = Globals::Hitman5Module ? Globals::Hitman5Module->m_pEntitySceneContext : nullptr;
+
+    BrickList s_Bricks;
+    ReadBricks(s_Context, s_Reads.bricks, s_Bricks);
+
+    // The local hero: registry slot 0, exactly as M5's outfit path resolves it.
+    ZEntityRef s_HeroRef;
+    ZHitman5* s_Hero = nullptr;
+    const ZPlayerRegistry* s_Registry = Globals::PlayerRegistry;
+
+    if (!s_Registry)
+    {
+        PlayerObservation::MarkIdentity(s_Reads.hero, FieldStatus::Unavailable, "player registry global null");
+        PlayerObservation::MarkLookup(s_Reads.round_trip, FieldStatus::Unavailable, "player registry global null");
+    }
+    else
+    {
+        s_HeroRef = s_Registry->m_aPlayerData[0].m_Controller.m_HitmanEntity;
+
+        if (!s_HeroRef)
+        {
+            PlayerObservation::MarkIdentity(s_Reads.hero, FieldStatus::Unavailable, "hero entity reference null");
+            PlayerObservation::MarkLookup(s_Reads.round_trip, FieldStatus::Unavailable, "hero entity reference null");
+        }
+        else
+        {
+            const TEntityRef<ZHitman5> s_HeroEntity(s_HeroRef);
+            s_Hero = s_HeroEntity.m_pInterfaceRef;
+            FillIdentity(s_HeroRef, s_Hero, s_Context, s_Bricks, s_Reads.hero);
+
+            // The round trip: the hero's authored id looked up through its owning entity's factory.
+            const ZEntityType* s_Type = s_HeroRef.GetEntity()->GetType();
+            if (!s_Type)
+                PlayerObservation::MarkLookup(s_Reads.round_trip, FieldStatus::Unavailable, "entity type null");
+            else
+                Lookup(s_HeroRef.GetOwningEntity(), s_Type->m_nEntityID, s_HeroRef, s_Reads.round_trip, nullptr);
+        }
+    }
+
+    s_Reads.round_trip_outcome = PlayerObservation::ClassifyRoundTrip(s_Reads.round_trip);
+
+    // The candidate: the named (or historical default) brick and authored entity id.
+    PlayerObservation::CandidateReads s_Candidate;
+    uint64_t s_BrickId = k_HitmenBrick.GetID();
+    uint64_t s_EntityId = k_HitmenAgent48;
+    bool s_IdsValid = true;
+    if (p_Query.brick && !PlayerObservation::ParseHex16(*p_Query.brick, s_BrickId))
+        s_IdsValid = false;
+    if (p_Query.entity_id && !PlayerObservation::ParseHex16(*p_Query.entity_id, s_EntityId))
+        s_IdsValid = false;
+    s_Candidate.brick_id = PlayerObservation::Hex16(s_BrickId);
+    s_Candidate.entity_id = PlayerObservation::Hex16(s_EntityId);
+
+    const ZEntityRef* s_BrickRoot = nullptr;
+    for (const auto& s_Brick : s_Bricks)
+        if (s_Brick.first == s_BrickId)
+        {
+            s_BrickRoot = &s_Brick.second;
+            break;
+        }
+
+    if (!s_IdsValid)
+    {
+        s_Candidate.brick_present = Field<bool>::Of(FieldStatus::Unavailable, "candidate id not parseable");
+        PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, "candidate id not parseable");
+        PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate id not parseable");
+        s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate id not parseable");
+        s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate id not parseable");
+    }
+    else if (!s_Context)
+    {
+        s_Candidate.brick_present = Field<bool>::Of(FieldStatus::Unavailable, "scene context null");
+        PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, "scene context null");
+        PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "scene context null");
+        s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "scene context null");
+        s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "scene context null");
+    }
+    else if (!s_BrickRoot)
+    {
+        // The expected negative control without content: the candidate brick is not loaded.
+        s_Candidate.brick_present = Field<bool>::Observed(false);
+        PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, "candidate brick not loaded");
+        PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate brick not loaded");
+        s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
+        s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
+    }
+    else
+    {
+        s_Candidate.brick_present = Field<bool>::Observed(true);
+        ZEntityRef s_Resolved;
+        Lookup(*s_BrickRoot, s_EntityId, s_HeroRef, s_Candidate.lookup, &s_Resolved);
+
+        if (s_Resolved)
+        {
+            const TEntityRef<ZHitman5> s_CandidateHero(s_Resolved);
+            s_Candidate.hitman5_resolved = Field<bool>::Observed(s_CandidateHero.m_pInterfaceRef != nullptr);
+            s_Candidate.spatial_resolved = Field<bool>::Observed(s_Resolved.QueryInterface<ZSpatialEntity>() != nullptr);
+            FillIdentity(s_Resolved, s_CandidateHero.m_pInterfaceRef, s_Context, s_Bricks, s_Candidate.identity);
+        }
+        else
+        {
+            PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate entity not resolved");
+            s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate entity not resolved");
+            s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate entity not resolved");
+        }
+    }
+
+    s_Reads.candidate = s_Candidate;
     return s_Reads;
 }

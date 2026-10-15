@@ -75,10 +75,13 @@ namespace CommandProtocol
     const char* StatusText(Status p_Status);
 
     // The compiled allowlist. relay.probe v1 and relay.inspect.outfit v1 (M5 C-1; read-only, one
-    // optional validated repository id) are executable; player.outfit.set v1 is reserved
-    // (documented, decoded, never executed); player.outfit.set v2 (M5 C-2B) is the effectful
-    // entry, decodable only on a version-2 link with the effectful setting on; any other
-    // name/version is unknown.
+    // optional validated repository id) are executable; relay.inspect.players v1 and
+    // relay.inspect.entity v1 (M6-B1; read-only: the player registry's four declared slots, the
+    // loaded-brick inventory, the local hero's authored identity and the blueprint-factory lookup
+    // round trip, with two optional 16-hex-digit parameters for the candidate brick and entity id)
+    // are executable and inert; player.outfit.set v1 is reserved (documented, decoded, never
+    // executed); player.outfit.set v2 (M5 C-2B) is the effectful entry, decodable only on a
+    // version-2 link with the effectful setting on; any other name/version is unknown.
     enum class Entry
     {
         Unknown,
@@ -86,12 +89,15 @@ namespace CommandProtocol
         RelayInspectOutfit1,
         PlayerOutfitSet1Reserved,
         PlayerOutfitSet2,
+        RelayInspectPlayers1,
+        RelayInspectEntity1,
     };
 
     Entry Lookup(std::string_view p_Name, uint32_t p_Version);
     bool IsEffectful(Entry p_Entry);
 
     bool ValidUuid(std::string_view p_Text);
+    bool ValidHex16(std::string_view p_Text); // exactly 16 lowercase hex digits (a runtime resource id or an authored entity id)
 
     // A complete outfit tuple: the kit definition's repository id (dashed lowercase), the charset
     // and the variation. The wire carries nothing else about an outfit.
