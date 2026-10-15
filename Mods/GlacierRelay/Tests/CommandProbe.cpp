@@ -44,6 +44,17 @@
 // "roundtrip-unrepresentable" (index -1), "factory-mismatch", "subentity-missing", "bricks-empty",
 // "bricks-oversized" (70), "dirty-transform", "invalid-flags" (predeleted). Every value is scripted
 // here and is never an observation of HITMAN.
+// The M6-B1 hardening stage adds the modes its three corrections need, every one a scripted FAKE
+// factory or list answer: "index-at-count" (count 2, index 2), "index-beyond-count" (count 2,
+// index 5), "count-negative" (count -1: the index is not looked up), "count-zero" (count 0, index
+// -1); "bricks-at-bound" (64 bricks, the candidate absent: a complete scan), "bricks-oversized"
+// now reports the candidate's absence as not established (70 bricks, 64 scanned),
+// "bricks-oversized-candidate" (70 + the candidate, scripted as found inside the scanned prefix);
+// "texts-maximal" (every text field 128 bytes, every other field unavailable with a 40-byte
+// reason: the first reduction stage), "texts-maximal-candidate" (the same with the candidate
+// present: the result at the 48-entry cap), "texts-escaped" (texts with quotes, backslashes, a
+// tab, a control character and a two-byte UTF-8 character), "reasons-maximal" (every registry and
+// entity field unavailable with a 40-byte reason). Pathological by design; never HITMAN state.
 // Exit code 0 when the link connected and was welcomed at least once.
 
 #include <Windows.h>
@@ -187,6 +198,15 @@ namespace
         return s_Slot;
     }
 
+    // M6-B1 hardening: the maximal reason (40 bytes) and the maximal text (128 bytes) the pathological
+    // modes script, and the escaped texts the texts-escaped mode scripts (the driver expects the same
+    // bytes back after BEAM's JSON decoding).
+    const std::string k_MaxReason(CommandProtocol::k_MaxObservedReasonBytes, 'r');
+    std::string MaxText(char p_Fill) { return std::string(CommandProtocol::k_MaxObservedTextBytes, p_Fill); }
+    constexpr const char* k_EscapedOwning = "\"back\\slash\ttab\x01" "ctl\xC3\xA9" "acute/end";
+    const std::string k_EscapedCharacter(64, '"');
+    const std::string k_EscapedInitial(42, '\x01');
+
     PlayerObservation::RegistryReads FakePlayers(const FakeWorld& p_World, const FakeOutfit::World& p_Outfit, const std::string& p_Mode)
     {
         using OutfitObservation::Field;
@@ -196,6 +216,15 @@ namespace
         {
             auto s_Reads = PlayerObservation::AllRegistry(FieldStatus::Unavailable, "fake registry global null");
             s_Reads.registry_available = Field<bool>::Observed(false);
+            s_Reads.thread_id = GetCurrentThreadId();
+            return s_Reads;
+        }
+
+        if (p_Mode == "reasons-maximal")
+        {
+            // every registry field unavailable with a maximal reason: the line exceeds the bound with
+            // the reasons and fits without them (the first reduction stage, every field kept)
+            auto s_Reads = PlayerObservation::AllRegistry(FieldStatus::Unavailable, k_MaxReason.c_str());
             s_Reads.thread_id = GetCurrentThreadId();
             return s_Reads;
         }
@@ -284,11 +313,25 @@ namespace
         PlayerObservation::EntityReads s_Reads;
         s_Reads.thread_id = GetCurrentThreadId();
 
+        if (p_Mode == "reasons-maximal")
+        {
+            // every entity field unavailable with a maximal reason (the candidate echoed); this shape
+            // fits the line with its reasons, which the driver verifies
+            auto s_All = PlayerObservation::AllEntity(FieldStatus::Unavailable, k_MaxReason.c_str(), p_Query);
+            s_All.candidate->brick_id = p_Query.brick.value_or(k_FakeHitmenBrick);
+            s_All.candidate->entity_id = p_Query.entity_id.value_or(k_FakeAgent48);
+            s_All.thread_id = GetCurrentThreadId();
+            return s_All;
+        }
+
         // the fake brick list: 5 at the menu, 23 in a mission (experiment 4's counts), or scripted
         size_t s_BrickCount = p_World.playing ? 23 : 5;
         if (p_Mode == "bricks-empty") s_BrickCount = 0;
-        if (p_Mode == "bricks-oversized") s_BrickCount = 70;
-        const bool s_CandidatePresent = p_Mode == "candidate-present";
+        if (p_Mode == "bricks-oversized" || p_Mode == "bricks-oversized-candidate") s_BrickCount = 70;
+        if (p_Mode == "bricks-at-bound") s_BrickCount = 64;
+        const bool s_CandidatePresent = p_Mode == "candidate-present" || p_Mode == "bricks-oversized-candidate" || p_Mode == "texts-maximal-candidate";
+        const bool s_TextsMaximal = p_Mode == "texts-maximal" || p_Mode == "texts-maximal-candidate";
+        const bool s_TextsEscaped = p_Mode == "texts-escaped";
         const std::string s_Brick = p_Query.brick.value_or(k_FakeHitmenBrick);
         const std::string s_EntityId = p_Query.entity_id.value_or(k_FakeAgent48);
 
@@ -298,7 +341,8 @@ namespace
         {
             char s_Buffer[17] = {};
             std::snprintf(s_Buffer, sizeof(s_Buffer), "00%014zx", i + 1);
-            s_Reads.bricks.ids.push_back(i == 1 ? std::string(k_FakeHeroBrick) : std::string(s_Buffer));
+            // texts-maximal: FAKE 128-byte "ids" so each id field reaches the text bound (the encoder truncates the joined text)
+            s_Reads.bricks.ids.push_back(s_TextsMaximal ? MaxText('a' + static_cast<char>(i % 26)) : (i == 1 ? std::string(k_FakeHeroBrick) : std::string(s_Buffer)));
         }
         if (s_CandidatePresent && s_Reads.bricks.ids.size() < PlayerObservation::k_MaxBrickIds)
             s_Reads.bricks.ids.push_back(s_Brick);
@@ -315,11 +359,66 @@ namespace
         else
         {
             s_Reads.hero = FakeIdentity(k_FakeHeroEntityId, k_FakeHeroBrick, -0.035, -3.832, -0.413, p_Mode);
+            if (s_TextsMaximal)
+            {
+                // every text at the bound; every non-text field unavailable with a maximal reason
+                s_Reads.hero.entity_id = Field<std::string>::Observed(MaxText('e'));
+                s_Reads.hero.owning_brick = Field<std::string>::Observed(MaxText('o'));
+                s_Reads.hero.character_id = Field<std::string>::Observed(MaxText('c'));
+                s_Reads.hero.initial_outfit_id = Field<std::string>::Observed(MaxText('i'));
+                s_Reads.hero.entity_flags = Field<int64_t>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Reads.hero.activated = Field<bool>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Reads.hero.predeleted = Field<bool>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Reads.hero.invincible = Field<bool>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Reads.hero.x = Field<double>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Reads.hero.y = Field<double>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Reads.hero.z = Field<double>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Reads.hero.transform_dirty = Field<bool>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Reads.hero.room_behaviour = Field<int64_t>::Of(FieldStatus::Unavailable, k_MaxReason);
+            }
+            if (s_TextsEscaped)
+            {
+                s_Reads.hero.owning_brick = Field<std::string>::Observed(k_EscapedOwning);
+                s_Reads.hero.character_id = Field<std::string>::Observed(k_EscapedCharacter);
+                s_Reads.hero.initial_outfit_id = Field<std::string>::Observed(k_EscapedInitial);
+            }
             auto& s_Trip = s_Reads.round_trip;
             s_Trip.owner_found = Field<bool>::Observed(true);
             s_Trip.factory_available = Field<bool>::Observed(true);
             s_Trip.factory_template = Field<bool>::Observed(p_Mode != "factory-mismatch");
-            if (p_Mode == "roundtrip-unrepresentable")
+            if (s_TextsMaximal)
+            {
+                // the lookup facts unavailable with maximal reasons too (the check as a text at its bound)
+                PlayerObservation::MarkLookup(s_Trip, FieldStatus::Unavailable, k_MaxReason.c_str());
+                s_Trip.owner_found = Field<bool>::Observed(true);
+                s_Trip.index_check = Field<std::string>::Observed(MaxText('k'));
+            }
+            else if (p_Mode == "index-at-count" || p_Mode == "index-beyond-count")
+            {
+                // correction A: a non-negative index at or beyond the count is an inconsistent factory answer
+                s_Trip.subentity_count = Field<int64_t>::Observed(2);
+                s_Trip.index = Field<int64_t>::Observed(p_Mode == "index-at-count" ? 2 : 5);
+                s_Trip.index_check = Field<std::string>::Observed(PlayerObservation::IndexCheckText(PlayerObservation::CheckSubEntityIndex(2, p_Mode == "index-at-count" ? 2 : 5)));
+                s_Trip.resolved = Field<bool>::Of(FieldStatus::Inconsistent, "index outside the sub-entity count");
+                s_Trip.same_entity = Field<bool>::Of(FieldStatus::Inconsistent, "index outside the sub-entity count");
+            }
+            else if (p_Mode == "count-negative")
+            {
+                s_Trip.subentity_count = Field<int64_t>::Observed(-1);
+                s_Trip.index = Field<int64_t>::Of(FieldStatus::Unavailable, "count invalid; index not looked up");
+                s_Trip.index_check = Field<std::string>::Observed(PlayerObservation::IndexCheckText(PlayerObservation::IndexCheck::CountInvalid));
+                s_Trip.resolved = Field<bool>::Of(FieldStatus::Inconsistent, "sub-entity count invalid");
+                s_Trip.same_entity = Field<bool>::Of(FieldStatus::Inconsistent, "sub-entity count invalid");
+            }
+            else if (p_Mode == "count-zero")
+            {
+                s_Trip.subentity_count = Field<int64_t>::Observed(0);
+                s_Trip.index = Field<int64_t>::Observed(-1);
+                s_Trip.index_check = Field<std::string>::Observed(PlayerObservation::IndexCheckText(PlayerObservation::CheckSubEntityIndex(0, -1)));
+                s_Trip.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
+                s_Trip.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
+            }
+            else if (p_Mode == "roundtrip-unrepresentable")
             {
                 s_Reads.hero.owning_brick = Field<std::string>::Of(FieldStatus::Unavailable, "fake: no owning entity");
                 PlayerObservation::MarkLookup(s_Trip, FieldStatus::Unavailable, "fake: owner not found");
@@ -370,6 +469,16 @@ namespace
             s_Candidate.lookup.same_entity = Field<bool>::Observed(false);
             s_Candidate.identity = FakeIdentity(s_EntityId.c_str(), s_Brick.c_str(), -40.99882, -24.293657, 0.4925565, p_Mode);
             s_Candidate.hitman5_resolved = Field<bool>::Observed(true);
+            if (s_TextsMaximal)
+            {
+                s_Candidate.identity.character_id = Field<std::string>::Observed(MaxText('k'));
+                s_Candidate.identity.entity_flags = Field<int64_t>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Candidate.identity.x = Field<double>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Candidate.identity.y = Field<double>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Candidate.identity.z = Field<double>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Candidate.identity.transform_dirty = Field<bool>::Of(FieldStatus::Unavailable, k_MaxReason);
+                s_Candidate.lookup.index_check = Field<std::string>::Observed(MaxText('q'));
+            }
         }
         else
         {
@@ -513,7 +622,7 @@ int main(int p_Argc, char** p_Argv)
 {
     if (p_Argc < 4)
     {
-        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short] [default|registry-unavailable|layout-unsupported|extra-slot|hero-missing|candidate-present|roundtrip-different|roundtrip-unrepresentable|factory-mismatch|subentity-missing|bricks-empty|bricks-oversized|dirty-transform|invalid-flags]\n");
+        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short] [default|registry-unavailable|layout-unsupported|extra-slot|hero-missing|candidate-present|roundtrip-different|roundtrip-unrepresentable|factory-mismatch|subentity-missing|bricks-empty|bricks-oversized|dirty-transform|invalid-flags|index-at-count|index-beyond-count|count-negative|count-zero|bricks-at-bound|bricks-oversized-candidate|texts-maximal|texts-maximal-candidate|texts-escaped|reasons-maximal]\n");
         return 2;
     }
 
