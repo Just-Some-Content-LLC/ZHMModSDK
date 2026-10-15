@@ -81,6 +81,32 @@ namespace PlayerObservation
         return *p_Facts.same_entity.value ? RoundTrip::SameEntity : RoundTrip::DifferentEntity;
     }
 
+    bool ScanComplete(const BrickReads& p_Bricks)
+    {
+        return p_Bricks.count.observed() && p_Bricks.scanned.observed() && *p_Bricks.scanned.value == *p_Bricks.count.value;
+    }
+
+    std::string ScanBoundReason(const BrickReads& p_Bricks)
+    {
+        return fmt::format("scan bound: {}/{} bricks scanned", p_Bricks.scanned.observed() ? *p_Bricks.scanned.value : -1, p_Bricks.count.observed() ? *p_Bricks.count.value : -1);
+    }
+
+    Field<bool> CandidatePresence(bool p_Found, const BrickReads& p_Bricks)
+    {
+        if (p_Found)
+            return Field<bool>::Observed(true);
+        if (!p_Bricks.count.observed() || !p_Bricks.scanned.observed())
+            return Field<bool>::Of(FieldStatus::Unavailable, "brick list unavailable");
+        if (ScanComplete(p_Bricks))
+            return Field<bool>::Observed(false);
+        return Field<bool>::Of(FieldStatus::Unavailable, ScanBoundReason(p_Bricks));
+    }
+
+    const char* UnmatchedOwnerReason(const BrickReads& p_Bricks)
+    {
+        return ScanComplete(p_Bricks) ? "owner is neither a loaded brick root nor the scene root" : "owner not in the scanned bricks (bound)";
+    }
+
     std::string Hex16(uint64_t p_Value)
     {
         return fmt::format("{:016x}", p_Value);
@@ -233,8 +259,8 @@ namespace PlayerObservation
         Append(p_Out, "slot0_matches_m5", p_Reads.slot0_matches_m5);
     }
 
-    // At most 5 (bricks) + 14 (hero) + 8 (round trip) + 3 + 14 (candidate when present) = 44; the
-    // scheduler adds four plain frame values (48 ≤ 48). Without a present candidate: 30 (+ 4).
+    // At most 6 (bricks) + 14 (hero) + 8 (round trip) + 3 + 13 (candidate when present) = 44; the
+    // scheduler adds four plain frame values (48 = the entry cap). Without a present candidate: 31 (+ 4).
     void AppendEntity(Entries& p_Out, const EntityReads& p_Reads)
     {
         Append(p_Out, "brick_count", p_Reads.bricks.count);
@@ -242,6 +268,7 @@ namespace PlayerObservation
         for (size_t i = 0; i < s_Groups.size(); ++i)
             Append(p_Out, ("brick_ids_" + std::to_string(i + 1)).c_str(), Field<std::string>::Observed(s_Groups[i]));
         Append(p_Out, "bricks_truncated", p_Reads.bricks.truncated);
+        Append(p_Out, "bricks_scanned", p_Reads.bricks.scanned);
 
         Append(p_Out, "hero_resolved", p_Reads.hero.resolved);
         AppendIdentity(p_Out, "hero_", p_Reads.hero, true);
@@ -270,7 +297,6 @@ namespace PlayerObservation
                 Append(p_Out, "cand_index_check", s_Candidate.lookup.index_check);
                 Append(p_Out, "cand_resolved", s_Candidate.lookup.resolved);
                 Append(p_Out, "cand_hitman5", s_Candidate.hitman5_resolved);
-                Append(p_Out, "cand_spatial", s_Candidate.spatial_resolved);
 
                 Field<bool> s_Distinct;
                 if (s_Candidate.lookup.same_entity.observed())
@@ -352,6 +378,7 @@ namespace PlayerObservation
         EntityReads s_Reads;
         s_Reads.bricks.count = Marked<int64_t>(p_Status, p_Reason);
         s_Reads.bricks.truncated = Marked<bool>(p_Status, p_Reason);
+        s_Reads.bricks.scanned = Marked<int64_t>(p_Status, p_Reason);
         MarkIdentity(s_Reads.hero, p_Status, p_Reason);
         MarkLookup(s_Reads.round_trip, p_Status, p_Reason);
         s_Reads.round_trip_outcome = RoundTrip::Unsupported;
@@ -365,7 +392,6 @@ namespace PlayerObservation
             MarkLookup(s_Candidate.lookup, p_Status, p_Reason);
             MarkIdentity(s_Candidate.identity, p_Status, p_Reason);
             s_Candidate.hitman5_resolved = Marked<bool>(p_Status, p_Reason);
-            s_Candidate.spatial_resolved = Marked<bool>(p_Status, p_Reason);
             s_Reads.candidate = s_Candidate;
         }
 

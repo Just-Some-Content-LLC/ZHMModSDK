@@ -33,7 +33,7 @@ namespace PlayerObservation
     using FieldStatus = CommandProtocol::FieldStatus;
 
     constexpr size_t k_SlotCount = 4;          // the registry's four declared inline player slots
-    constexpr size_t k_MaxBricksScanned = 64;  // bound of the loaded-brick traversal
+    constexpr size_t k_MaxBricksScanned = 64;  // bound of the loaded-brick traversal (the lookup scan): a longer list is scanned in part, and absence from it is not established
     constexpr size_t k_IdsPerField = 7;        // 7 × 16 hex + 6 commas = 118 bytes, within the 128-byte text bound
     constexpr size_t k_MaxIdFields = 3;        // at most 21 brick ids reported; the count says how many exist
     constexpr size_t k_MaxBrickIds = k_IdsPerField * k_MaxIdFields;
@@ -97,9 +97,19 @@ namespace PlayerObservation
     struct BrickReads
     {
         Field<int64_t> count;            // m_aLoadedBricks.size()
-        std::vector<std::string> ids;    // the first k_MaxBrickIds runtime resource ids (16 hex each)
-        Field<bool> truncated;           // more bricks exist than were reported
+        std::vector<std::string> ids;    // the first k_MaxBrickIds runtime resource ids (16 hex each): the display
+        Field<bool> truncated;           // display truncation: more bricks exist than ids were reported
+        Field<int64_t> scanned;          // correction C: how many bricks the bounded lookup scan visited (min(count, k_MaxBricksScanned)); the scan is complete when scanned == count
     };
+
+    // Correction C: a bounded prefix scan establishes a candidate's presence when it finds it, and its
+    // absence only when the scan was complete; an incomplete scan without a match is unavailable with
+    // the scan bound as the reason, never "false". Display truncation (ids reported) and lookup-scan
+    // truncation (bricks visited) are distinct observations.
+    bool ScanComplete(const BrickReads& p_Bricks);
+    std::string ScanBoundReason(const BrickReads& p_Bricks);           // "scan bound: 64/70 bricks scanned"
+    Field<bool> CandidatePresence(bool p_Found, const BrickReads& p_Bricks);
+    const char* UnmatchedOwnerReason(const BrickReads& p_Bricks);      // an owning entity that matched no scanned brick root and is not the scene root
 
     // The facts of one blueprint-factory lookup as plain values. For the local hero's round trip the
     // reference is the hero itself (same_entity: the lookup returned the hero); for the candidate the
@@ -150,11 +160,10 @@ namespace PlayerObservation
     {
         std::string brick_id;            // the query's brick (16 hex; the default when the command named none)
         std::string entity_id;           // the query's authored entity id (16 hex; the default when none)
-        Field<bool> brick_present;       // the brick id is in the loaded-brick list
+        Field<bool> brick_present;       // the brick id is in the scanned loaded-brick list (CandidatePresence: false only from a complete scan)
         LookupFacts lookup;              // same_entity: the candidate resolved to the local hero's own entity
-        EntityIdentity identity;         // the candidate's identity when it resolved
+        EntityIdentity identity;         // the candidate's identity when it resolved (its x/y/z/transform_dirty statuses say whether the spatial interface resolved)
         Field<bool> hitman5_resolved;
-        Field<bool> spatial_resolved;
     };
 
     struct EntityQuery

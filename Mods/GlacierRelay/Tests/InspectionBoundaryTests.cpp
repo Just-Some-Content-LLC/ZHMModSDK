@@ -7,10 +7,15 @@
 // line, escapes and the encoder's truncations included, after every marker and note; near-boundary
 // results, maximal texts, maximal reasons, JSON escaping, both stages, the entry cap, the reason
 // bound, the maximal header, metadata preserved, the scheduler's own re-check; the final encoded
-// byte length asserted in every case). Fake values only: no engine pointer is constructed, valid or
-// invalid; no memory is written; no setter exists on this path.
+// byte length asserted in every case). Correction C: partial brick-scan semantics (a candidate's
+// absence established only by a complete scan; an incomplete scan without a match unavailable with
+// the scan bound as the reason; a candidate inside the scanned prefix still positively observable;
+// display truncation distinct from lookup-scan truncation; counts below, at and above the bound).
+// Fake values only: no engine pointer is constructed, valid or invalid; no memory is written; no
+// setter exists on this path.
 #include "TestHarness.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -164,41 +169,50 @@ namespace
         for (size_t i = 0; i < s_All.size() && i < PlayerObservation::k_MaxBrickIds; ++i)
             s_Reads.bricks.ids.push_back(s_All[i]);
         s_Reads.bricks.truncated = Field<bool>::Observed(p_Bricks > PlayerObservation::k_MaxBrickIds);
+        s_Reads.bricks.scanned = Field<int64_t>::Observed(static_cast<int64_t>(std::min(p_Bricks, PlayerObservation::k_MaxBricksScanned)));
         s_Reads.hero = HeroIdentity();
         s_Reads.round_trip = p_Trip;
         s_Reads.round_trip_outcome = PlayerObservation::ClassifyRoundTrip(s_Reads.round_trip);
 
+        // the candidate absent from the scanned prefix, decided exactly as the reader decides it
         PlayerObservation::CandidateReads s_Candidate;
         s_Candidate.brick_id = k_HitmenBrick;
         s_Candidate.entity_id = k_Agent48;
-        s_Candidate.brick_present = Field<bool>::Observed(false);
-        PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, "candidate brick not loaded");
-        PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate brick not loaded");
-        s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
-        s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
+        s_Candidate.brick_present = PlayerObservation::CandidatePresence(false, s_Reads.bricks);
+        const std::string s_Why = s_Candidate.brick_present.observed() ? "candidate brick not loaded" : s_Candidate.brick_present.reason;
+        PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, s_Why.c_str());
+        PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, s_Why.c_str());
+        s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, s_Why);
         s_Reads.candidate = s_Candidate;
         return s_Reads;
     }
 
-    // The same read set with the candidate brick present and its lookup scripted.
+    // The same read set with the candidate brick found inside the scanned prefix and its lookup scripted.
     EntityReads WithCandidateLookup(EntityReads p_Reads, const LookupFacts& p_Lookup)
     {
         auto& s_Candidate = *p_Reads.candidate;
-        s_Candidate.brick_present = Field<bool>::Observed(true);
+        s_Candidate.brick_present = PlayerObservation::CandidatePresence(true, p_Reads.bricks);
         s_Candidate.lookup = p_Lookup;
         if (p_Lookup.resolved.observed() && *p_Lookup.resolved.value)
         {
             s_Candidate.identity = HeroIdentity(k_Agent48, k_HitmenBrick);
             s_Candidate.hitman5_resolved = Field<bool>::Observed(true);
-            s_Candidate.spatial_resolved = Field<bool>::Observed(true);
         }
         else
         {
             PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate entity not resolved");
             s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate entity not resolved");
-            s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate entity not resolved");
         }
         return p_Reads;
+    }
+
+    size_t CountPrefixed(const Result& p_Result, const char* p_Prefix)
+    {
+        size_t s_Count = 0;
+        for (const auto& s_Entry : p_Result.observed)
+            if (s_Entry.first.rfind(p_Prefix, 0) == 0)
+                ++s_Count;
+        return s_Count;
     }
 
     const ObservedValue* Observed(const Result& p_Result, const char* p_Key)
@@ -457,8 +471,8 @@ void RunInspectionBoundaryTests()
                 CHECK(IntField(s_Result, "rt_index") == *s_Case.index);
             else
                 CHECK(FieldIs(s_Result, "rt_index", FieldStatus::Unavailable) && Reason(s_Result, "rt_index") == "count invalid; index not looked up");
-            CHECK(s_Result.observed.size() == 34 && EncodeResult(s_Result).size() <= k_MaxLineBytes);
-            if (s_Result.observed.size() != 34 || TextField(s_Result, "rt_index_check") != s_Case.check || TextField(s_Result, "rt_outcome") != s_Case.outcome)
+            CHECK(s_Result.observed.size() == 35 && EncodeResult(s_Result).size() <= k_MaxLineBytes);
+            if (s_Result.observed.size() != 35 || TextField(s_Result, "rt_index_check") != s_Case.check || TextField(s_Result, "rt_outcome") != s_Case.outcome)
                 std::printf("  boundary case '%s': %zu entries, check %s, outcome %s\n", s_Case.name, s_Result.observed.size(), TextField(s_Result, "rt_index_check").c_str(), TextField(s_Result, "rt_outcome").c_str());
         }
 
@@ -713,5 +727,136 @@ void RunInspectionBoundaryTests()
         CHECK(MarkerCount(s_Result) == 0 || MarkersLast(s_Result));
         CHECK(s_Result.command_id == CommandTest::Uuid(1) && s_Result.frame && *s_Result.frame == 100 && s_Result.mission_generation && *s_Result.mission_generation == k_Gen1 && s_Result.link_generation == 1);
         std::printf("line bound: the scheduler's maximal FAKE entity result encodes to %zu bytes (%s; reduced %llu, unbounded %llu)\n", Encoded(s_Result), MarkerCount(s_Result) ? "reduced" : "not reduced", s_Stats.reduced, s_Stats.unbounded);
+    }
+
+    // ==== Correction C: partial brick-scan semantics ===============================================
+
+    // ---- the pure rule: presence from a bounded prefix scan ------------------------------------------
+    {
+        const auto s_Bricks = [](int64_t p_Count) {
+            PlayerObservation::BrickReads s_Reads;
+            s_Reads.count = Field<int64_t>::Observed(p_Count);
+            s_Reads.scanned = Field<int64_t>::Observed(std::min<int64_t>(p_Count, static_cast<int64_t>(PlayerObservation::k_MaxBricksScanned)));
+            s_Reads.truncated = Field<bool>::Observed(p_Count > static_cast<int64_t>(PlayerObservation::k_MaxBrickIds));
+            return s_Reads;
+        };
+        CHECK(PlayerObservation::k_MaxBricksScanned == 64 && PlayerObservation::k_MaxBrickIds == 21);
+
+        // the scan is complete up to and including the bound, partial beyond it
+        CHECK(PlayerObservation::ScanComplete(s_Bricks(0)) && PlayerObservation::ScanComplete(s_Bricks(23)) && PlayerObservation::ScanComplete(s_Bricks(63)) && PlayerObservation::ScanComplete(s_Bricks(64)));
+        CHECK(!PlayerObservation::ScanComplete(s_Bricks(65)) && !PlayerObservation::ScanComplete(s_Bricks(70)) && !PlayerObservation::ScanComplete(s_Bricks(100000)));
+
+        // found inside the scanned prefix: present, whatever the count
+        for (const int64_t s_Count : {1, 23, 63, 64, 65, 70})
+        {
+            const auto s_Presence = PlayerObservation::CandidatePresence(true, s_Bricks(s_Count));
+            CHECK(s_Presence.observed() && *s_Presence.value);
+        }
+        // absent: "false" only from a complete scan
+        for (const int64_t s_Count : {0, 1, 23, 63, 64})
+        {
+            const auto s_Presence = PlayerObservation::CandidatePresence(false, s_Bricks(s_Count));
+            CHECK(s_Presence.observed() && !*s_Presence.value && s_Presence.reason.empty());
+        }
+        // absent from a partial scan: unavailable with the scan bound as the reason, never "false"
+        for (const int64_t s_Count : {65, 70, 1000})
+        {
+            const auto s_Presence = PlayerObservation::CandidatePresence(false, s_Bricks(s_Count));
+            CHECK(!s_Presence.observed() && s_Presence.status == FieldStatus::Unavailable && s_Presence.reason == "scan bound: 64/" + std::to_string(s_Count) + " bricks scanned");
+            CHECK(s_Presence.reason.size() <= k_MaxObservedReasonBytes);
+        }
+        // an unavailable brick list: unavailable, never "false"
+        PlayerObservation::BrickReads s_None;
+        s_None.count = Field<int64_t>::Of(FieldStatus::Unavailable, "scene context null");
+        s_None.scanned = Field<int64_t>::Of(FieldStatus::Unavailable, "scene context null");
+        s_None.truncated = Field<bool>::Of(FieldStatus::Unavailable, "scene context null");
+        CHECK(!PlayerObservation::ScanComplete(s_None));
+        const auto s_NonePresence = PlayerObservation::CandidatePresence(false, s_None);
+        CHECK(s_NonePresence.status == FieldStatus::Unavailable && s_NonePresence.reason == "brick list unavailable");
+
+        // display truncation and lookup-scan truncation are distinct observations
+        CHECK(*s_Bricks(23).truncated.value && PlayerObservation::ScanComplete(s_Bricks(23)));   // display partial, scan complete
+        CHECK(*s_Bricks(70).truncated.value && !PlayerObservation::ScanComplete(s_Bricks(70)));  // both partial
+        CHECK(!*s_Bricks(10).truncated.value && PlayerObservation::ScanComplete(s_Bricks(10)));  // neither
+        CHECK(*s_Bricks(64).truncated.value && PlayerObservation::ScanComplete(s_Bricks(64)));   // the bound itself is complete
+
+        // the owner that matched no scanned brick root: "neither" only from a complete scan
+        CHECK(std::string(PlayerObservation::UnmatchedOwnerReason(s_Bricks(23))) == "owner is neither a loaded brick root nor the scene root");
+        CHECK(std::string(PlayerObservation::UnmatchedOwnerReason(s_Bricks(70))) == "owner not in the scanned bricks (bound)");
+        CHECK(std::string(PlayerObservation::UnmatchedOwnerReason(s_Bricks(70))).size() <= k_MaxObservedReasonBytes);
+    }
+
+    // ---- the scheduler's encoding: counts below, at and above the bound, candidate absent or found ----
+    {
+        struct Case
+        {
+            size_t count;
+            bool found;
+            const char* expect; // "false" | "unavailable" | "true"
+            size_t entries;
+        };
+        const Case s_Cases[] = {
+            {0, false, "false", 32},        // no id field; a complete (empty) scan
+            {5, false, "false", 33},        // one id field
+            {23, false, "false", 35},       // display truncated (21 of 23 ids), scan complete
+            {63, false, "false", 35},       // one below the bound
+            {64, false, "false", 35},       // at the bound: still complete
+            {65, false, "unavailable", 35}, // one above: absence not established
+            {70, false, "unavailable", 35},
+            {23, true, "true", 48},         // found, complete scan
+            {65, true, "true", 48},         // found inside the prefix of a partial scan
+            {70, true, "true", 48},
+        };
+
+        for (const Case& s_Case : s_Cases)
+        {
+            const Result s_Result = RunEntity(Frame(100, 5000, true), [&](const EntityQuery&) {
+                EntityReads s_Reads = EntityWithRoundTrip(ScriptedLookup(2, 1), s_Case.count);
+                return s_Case.found ? WithCandidateLookup(s_Reads, ScriptedLookup(3, 2, false)) : s_Reads;
+            }, EntityCommand(CommandTest::Uuid(1)));
+
+            const int64_t s_Count = static_cast<int64_t>(s_Case.count);
+            const int64_t s_Scanned = std::min<int64_t>(s_Count, 64);
+            const size_t s_IdFields = std::min<size_t>((std::min<size_t>(s_Case.count, 21) + 6) / 7, 3);
+            CHECK(s_Result.status == Status::Applied);
+            CHECK(IntField(s_Result, "brick_count") == s_Count && IntField(s_Result, "bricks_scanned") == s_Scanned);
+            CHECK(BoolField(s_Result, "bricks_truncated", s_Case.count > 21) && CountPrefixed(s_Result, "brick_ids_") == s_IdFields);
+            CHECK(!Observed(s_Result, "cand_spatial"));
+            CHECK(TextField(s_Result, "cand_brick") == k_HitmenBrick && TextField(s_Result, "cand_entity_id") == k_Agent48);
+
+            const std::string s_Expect = s_Case.expect;
+            if (s_Expect == "false")
+            {
+                CHECK(BoolField(s_Result, "cand_brick_present", false) && Reason(s_Result, "cand_brick_present").empty());
+                CHECK(!Observed(s_Result, "cand_index") && !Observed(s_Result, "cand_hitman5"));
+            }
+            else if (s_Expect == "unavailable")
+            {
+                CHECK(FieldIs(s_Result, "cand_brick_present", FieldStatus::Unavailable));
+                CHECK(Reason(s_Result, "cand_brick_present") == "scan bound: 64/" + std::to_string(s_Count) + " bricks scanned");
+                CHECK(!Observed(s_Result, "cand_index") && !Observed(s_Result, "cand_hitman5"));
+            }
+            else
+            {
+                CHECK(BoolField(s_Result, "cand_brick_present", true) && IntField(s_Result, "cand_index") == 2 && TextField(s_Result, "cand_index_check") == "in_range");
+                CHECK(BoolField(s_Result, "cand_resolved", true) && BoolField(s_Result, "cand_hitman5", true) && BoolField(s_Result, "cand_distinct_from_local", true));
+            }
+            CHECK(s_Result.observed.size() == s_Case.entries && s_Result.observed.size() <= k_MaxObservedEntries && EncodeResult(s_Result).size() <= k_MaxLineBytes);
+            if (s_Result.observed.size() != s_Case.entries)
+                std::printf("  brick-scan case count %zu found %d: %zu entries (expected %zu)\n", s_Case.count, s_Case.found ? 1 : 0, s_Result.observed.size(), s_Case.entries);
+        }
+
+        // the hero's owning brick beyond a partial scan is reported as such, never as "neither"
+        const Result s_Owner = RunEntity(Frame(100, 5000, true), [](const EntityQuery&) {
+            EntityReads s_Reads = EntityWithRoundTrip(ScriptedLookup(2, 1), 70);
+            s_Reads.hero.owning_brick = Field<std::string>::Of(FieldStatus::Unavailable, PlayerObservation::UnmatchedOwnerReason(s_Reads.bricks));
+            return s_Reads;
+        }, EntityCommand(CommandTest::Uuid(2)));
+        CHECK(FieldIs(s_Owner, "hero_owning_brick", FieldStatus::Unavailable) && Reason(s_Owner, "hero_owning_brick") == "owner not in the scanned bricks (bound)");
+        CHECK(TextField(s_Owner, "rt_outcome") == "same_entity"); // the lookup itself goes through the owning entity, not the scan
+
+        // the no-inspector and faulted paths carry the scan count marked, never defaulted
+        const Result s_None = RunEntity(Frame(100, 5000, true), nullptr, EntityCommand(CommandTest::Uuid(3)));
+        CHECK(FieldIs(s_None, "bricks_scanned", FieldStatus::Unsupported) && FieldIs(s_None, "cand_brick_present", FieldStatus::Unsupported));
     }
 }

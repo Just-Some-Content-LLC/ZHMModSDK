@@ -323,12 +323,16 @@ namespace
     // A bounded copy of the loaded-brick list's ids and root references, valid for this frame only.
     using BrickList = std::vector<std::pair<uint64_t, ZEntityRef>>;
 
+    // The list is scanned in a bounded prefix (k_MaxBricksScanned) for the lookups, and the first
+    // k_MaxBrickIds ids are reported for display; the two bounds are reported separately (correction
+    // C): "scanned" says how far the lookup scan went, "truncated" says the display is partial.
     void ReadBricks(const ZEntitySceneContext* p_Context, PlayerObservation::BrickReads& p_Out, BrickList& p_List)
     {
         if (!p_Context)
         {
             p_Out.count = Field<int64_t>::Of(FieldStatus::Unavailable, "scene context null");
             p_Out.truncated = Field<bool>::Of(FieldStatus::Unavailable, "scene context null");
+            p_Out.scanned = Field<int64_t>::Of(FieldStatus::Unavailable, "scene context null");
             return;
         }
 
@@ -346,10 +350,12 @@ namespace
         }
 
         p_Out.truncated = Field<bool>::Observed(s_Count > PlayerObservation::k_MaxBrickIds);
+        p_Out.scanned = Field<int64_t>::Observed(static_cast<int64_t>(s_Scanned));
     }
 
-    // The owning entity named as a loaded brick's root, the scene root, or neither.
-    Field<std::string> BrickOf(const ZEntityRef& p_Owner, const ZEntitySceneContext* p_Context, const BrickList& p_Bricks)
+    // The owning entity named as a scanned brick's root, the scene root, or neither — "neither" is
+    // established only when the scan was complete; otherwise the owner may lie beyond the bound.
+    Field<std::string> BrickOf(const ZEntityRef& p_Owner, const ZEntitySceneContext* p_Context, const BrickList& p_Bricks, const PlayerObservation::BrickReads& p_Reads)
     {
         for (const auto& s_Brick : p_Bricks)
             if (s_Brick.second == p_Owner)
@@ -358,14 +364,14 @@ namespace
         if (p_Context && p_Context->m_pScene && p_Context->m_pScene.m_entityRef == p_Owner)
             return Field<std::string>::Observed("scene");
 
-        return Field<std::string>::Of(FieldStatus::Unavailable, "owner is neither a loaded brick root nor the scene root");
+        return Field<std::string>::Of(FieldStatus::Unavailable, PlayerObservation::UnmatchedOwnerReason(p_Reads));
     }
 
     // The identity fields of one entity reference, all inline reads of declared SDK memory: the
     // entity type's authored id and the entity's flags, the owning entity's brick, the ZHitman5
     // fields when the interface resolved, and the spatial entity's stored translation with its
     // dirty flag (GetObjectToWorldMatrix is never called: it refreshes the engine's cache).
-    void FillIdentity(const ZEntityRef& p_Ref, ZHitman5* p_Hero, const ZEntitySceneContext* p_Context, const BrickList& p_Bricks, EntityIdentity& p_Out)
+    void FillIdentity(const ZEntityRef& p_Ref, ZHitman5* p_Hero, const ZEntitySceneContext* p_Context, const BrickList& p_Bricks, const PlayerObservation::BrickReads& p_BrickReads, EntityIdentity& p_Out)
     {
         if (!p_Ref)
         {
@@ -388,7 +394,7 @@ namespace
         p_Out.predeleted = Field<bool>::Observed((s_Flags & PlayerObservation::k_FlagPredeleted) != 0);
 
         const ZEntityRef s_Owner = p_Ref.GetOwningEntity();
-        p_Out.owning_brick = s_Owner ? BrickOf(s_Owner, p_Context, p_Bricks) : Field<std::string>::Of(FieldStatus::Unavailable, "no owning entity");
+        p_Out.owning_brick = s_Owner ? BrickOf(s_Owner, p_Context, p_Bricks, p_BrickReads) : Field<std::string>::Of(FieldStatus::Unavailable, "no owning entity");
 
         if (p_Hero)
         {
@@ -628,7 +634,7 @@ PlayerObservation::EntityReads SceneObservation::ObserveEntity(const PlayerObser
         {
             const TEntityRef<ZHitman5> s_HeroEntity(s_HeroRef);
             s_Hero = s_HeroEntity.m_pInterfaceRef;
-            FillIdentity(s_HeroRef, s_Hero, s_Context, s_Bricks, s_Reads.hero);
+            FillIdentity(s_HeroRef, s_Hero, s_Context, s_Bricks, s_Reads.bricks, s_Reads.hero);
 
             // The round trip: the hero's authored id looked up through its owning entity's factory.
             const ZEntityType* s_Type = s_HeroRef.GetEntity()->GetType();
@@ -667,7 +673,6 @@ PlayerObservation::EntityReads SceneObservation::ObserveEntity(const PlayerObser
         PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, "candidate id not parseable");
         PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate id not parseable");
         s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate id not parseable");
-        s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate id not parseable");
     }
     else if (!s_Context)
     {
@@ -675,20 +680,21 @@ PlayerObservation::EntityReads SceneObservation::ObserveEntity(const PlayerObser
         PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, "scene context null");
         PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "scene context null");
         s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "scene context null");
-        s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "scene context null");
     }
     else if (!s_BrickRoot)
     {
-        // The expected negative control without content: the candidate brick is not loaded.
-        s_Candidate.brick_present = Field<bool>::Observed(false);
-        PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, "candidate brick not loaded");
-        PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate brick not loaded");
-        s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
-        s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
+        // Absent from the scanned prefix (correction C): the expected negative control without
+        // content when the scan was complete; otherwise unavailable with the scan bound as the
+        // reason, since the brick may lie beyond the bound.
+        s_Candidate.brick_present = PlayerObservation::CandidatePresence(false, s_Reads.bricks);
+        const std::string s_Why = s_Candidate.brick_present.observed() ? "candidate brick not loaded" : s_Candidate.brick_present.reason;
+        PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, s_Why.c_str());
+        PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, s_Why.c_str());
+        s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, s_Why);
     }
     else
     {
-        s_Candidate.brick_present = Field<bool>::Observed(true);
+        s_Candidate.brick_present = PlayerObservation::CandidatePresence(true, s_Reads.bricks);
         ZEntityRef s_Resolved;
         Lookup(*s_BrickRoot, s_EntityId, s_HeroRef, s_Candidate.lookup, &s_Resolved);
 
@@ -696,14 +702,12 @@ PlayerObservation::EntityReads SceneObservation::ObserveEntity(const PlayerObser
         {
             const TEntityRef<ZHitman5> s_CandidateHero(s_Resolved);
             s_Candidate.hitman5_resolved = Field<bool>::Observed(s_CandidateHero.m_pInterfaceRef != nullptr);
-            s_Candidate.spatial_resolved = Field<bool>::Observed(s_Resolved.QueryInterface<ZSpatialEntity>() != nullptr);
-            FillIdentity(s_Resolved, s_CandidateHero.m_pInterfaceRef, s_Context, s_Bricks, s_Candidate.identity);
+            FillIdentity(s_Resolved, s_CandidateHero.m_pInterfaceRef, s_Context, s_Bricks, s_Reads.bricks, s_Candidate.identity);
         }
         else
         {
             PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate entity not resolved");
             s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate entity not resolved");
-            s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate entity not resolved");
         }
     }
 

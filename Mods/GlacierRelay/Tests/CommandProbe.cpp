@@ -48,6 +48,7 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -291,7 +292,8 @@ namespace
         const std::string s_Brick = p_Query.brick.value_or(k_FakeHitmenBrick);
         const std::string s_EntityId = p_Query.entity_id.value_or(k_FakeAgent48);
 
-        s_Reads.bricks.count = Field<int64_t>::Observed(static_cast<int64_t>(s_BrickCount + (s_CandidatePresent ? 1 : 0)));
+        const size_t s_Total = s_BrickCount + (s_CandidatePresent ? 1 : 0);
+        s_Reads.bricks.count = Field<int64_t>::Observed(static_cast<int64_t>(s_Total));
         for (size_t i = 0; i < s_BrickCount && s_Reads.bricks.ids.size() < PlayerObservation::k_MaxBrickIds; ++i)
         {
             char s_Buffer[17] = {};
@@ -300,7 +302,8 @@ namespace
         }
         if (s_CandidatePresent && s_Reads.bricks.ids.size() < PlayerObservation::k_MaxBrickIds)
             s_Reads.bricks.ids.push_back(s_Brick);
-        s_Reads.bricks.truncated = Field<bool>::Observed(s_BrickCount + (s_CandidatePresent ? 1 : 0) > PlayerObservation::k_MaxBrickIds);
+        s_Reads.bricks.truncated = Field<bool>::Observed(s_Total > PlayerObservation::k_MaxBrickIds);
+        s_Reads.bricks.scanned = Field<int64_t>::Observed(static_cast<int64_t>(std::min(s_Total, PlayerObservation::k_MaxBricksScanned))); // the bounded lookup scan (correction C)
 
         // the local hero: present at the menu and in a mission (experiment 4, F5: a local player
         // exists in the main menu), as the fake registry's slot 0 reports; absent only when scripted
@@ -355,7 +358,8 @@ namespace
         s_Candidate.entity_id = s_EntityId;
         if (s_CandidatePresent)
         {
-            s_Candidate.brick_present = Field<bool>::Observed(true);
+            // the scripted candidate lies inside the scanned prefix
+            s_Candidate.brick_present = PlayerObservation::CandidatePresence(true, s_Reads.bricks);
             s_Candidate.lookup.owner_found = Field<bool>::Observed(true);
             s_Candidate.lookup.factory_available = Field<bool>::Observed(true);
             s_Candidate.lookup.factory_template = Field<bool>::Observed(true);
@@ -366,15 +370,16 @@ namespace
             s_Candidate.lookup.same_entity = Field<bool>::Observed(false);
             s_Candidate.identity = FakeIdentity(s_EntityId.c_str(), s_Brick.c_str(), -40.99882, -24.293657, 0.4925565, p_Mode);
             s_Candidate.hitman5_resolved = Field<bool>::Observed(true);
-            s_Candidate.spatial_resolved = Field<bool>::Observed(true);
         }
         else
         {
-            s_Candidate.brick_present = Field<bool>::Observed(false);
-            PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, "candidate brick not loaded");
-            PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, "candidate brick not loaded");
-            s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
-            s_Candidate.spatial_resolved = Field<bool>::Of(FieldStatus::Unavailable, "candidate brick not loaded");
+            // absent from the scanned prefix: "false" only from a complete scan, otherwise unavailable
+            // with the scan bound as the reason (correction C), decided by the same rule the DLL applies
+            s_Candidate.brick_present = PlayerObservation::CandidatePresence(false, s_Reads.bricks);
+            const std::string s_Why = s_Candidate.brick_present.observed() ? "candidate brick not loaded" : s_Candidate.brick_present.reason;
+            PlayerObservation::MarkLookup(s_Candidate.lookup, FieldStatus::Unavailable, s_Why.c_str());
+            PlayerObservation::MarkIdentity(s_Candidate.identity, FieldStatus::Unavailable, s_Why.c_str());
+            s_Candidate.hitman5_resolved = Field<bool>::Of(FieldStatus::Unavailable, s_Why);
         }
         s_Reads.candidate = s_Candidate;
         return s_Reads;
