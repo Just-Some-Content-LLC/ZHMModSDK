@@ -43,6 +43,12 @@ namespace PlayerObservation
     constexpr int64_t k_FlagActivated = 4;
     constexpr int64_t k_FlagPredeleted = 8;
 
+    // M6-B1 hardening, correction A: a factory's sub-entity count is used only when it is valid —
+    // non-negative and within a plausibility bound (a documented bound against a garbage read, not an
+    // engine limit; a larger count is reported as read and refused as invalid) — and a sub-entity is
+    // accessed only at an index inside [0, count). The check is a typed observation beside the index.
+    constexpr int64_t k_MaxSubEntityCount = 1 << 20;
+
     // ---- relay.inspect.players v1 ----------------------------------------------------------------
 
     struct SlotReads
@@ -103,11 +109,28 @@ namespace PlayerObservation
         Field<bool> owner_found;         // an owning entity (the hero's) or the named brick root (the candidate's) exists
         Field<bool> factory_available;   // GetBlueprintFactory() on it is non-null
         Field<bool> factory_template;    // that factory's vtable is the template entity blueprint factory's
-        Field<int64_t> subentity_count;  // GetSubEntitiesCount()
-        Field<int64_t> index;            // GetSubEntityIndex(entity id); -1 = not a sub-entity of that factory
-        Field<bool> resolved;            // GetSubEntity(owner, index) returned a non-null entity
+        Field<int64_t> subentity_count;  // GetSubEntitiesCount(), as read (valid or not)
+        Field<int64_t> index;            // GetSubEntityIndex(entity id), as read; unavailable when the count was invalid (not looked up)
+        Field<std::string> index_check;  // correction A: "in_range" | "negative" | "out_of_range" | "count_invalid" (IndexCheckText)
+        Field<bool> resolved;            // GetSubEntity(owner, index) returned a non-null entity — called only when index_check is in_range
         Field<bool> same_entity;         // that entity is the reference entity (pointer equality on this frame; an observation, not an identity)
     };
+
+    // Correction A: the bounds check of one lookup as a closed vocabulary. A negative index is the
+    // factory's own "not a sub-entity" answer (the SDK's convention is -1; any negative value is
+    // reported as read); a non-negative index at or beyond the count, or an invalid count, is an
+    // inconsistent factory answer and refuses the sub-entity access. The two are never conflated.
+    enum class IndexCheck
+    {
+        InRange,      // 0 <= index < count: the one case in which GetSubEntity may be called
+        Negative,     // index < 0: not a sub-entity of that factory
+        OutOfRange,   // count valid, index >= count
+        CountInvalid, // count < 0 or count > k_MaxSubEntityCount: the index is not looked up
+    };
+
+    const char* IndexCheckText(IndexCheck p_Check);
+    bool SubEntityCountValid(int64_t p_Count);
+    IndexCheck CheckSubEntityIndex(int64_t p_Count, int64_t p_Index);
 
     // The six outcomes the authorization distinguishes (M6-B1 section 5).
     enum class RoundTrip
@@ -115,9 +138,9 @@ namespace PlayerObservation
         SameEntity,            // 1. a valid lookup returned the original entity
         DifferentEntity,       // 2. a valid lookup returned a different entity: the one specific failure of the lookup contract
         OwnerUnresolved,       // 3. the owning entity / brick could not be established
-        HeroNotRepresentable,  // 4. the hero's id is not a sub-entity of that factory (index -1)
+        HeroNotRepresentable,  // 4. the hero's id is not a sub-entity of that factory (a negative index)
         FactoryUnavailable,    // 5. a required factory or interface was unavailable (null, or not a template factory)
-        Unsupported,           // 6. unsupported or inconclusive (a read failed, or a valid index resolved to nothing)
+        Unsupported,           // 6. unsupported or inconclusive (a read failed, the count or index was out of bounds — index_check says which — or a valid index resolved to nothing)
     };
 
     const char* RoundTripText(RoundTrip p_Outcome);

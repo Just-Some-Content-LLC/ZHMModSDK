@@ -168,6 +168,7 @@ namespace
         s_Facts.factory_template = Field<bool>::Observed(true);
         s_Facts.subentity_count = Field<int64_t>::Observed(2);
         s_Facts.index = Field<int64_t>::Observed(1);
+        s_Facts.index_check = Field<std::string>::Observed("in_range");
         s_Facts.resolved = Field<bool>::Observed(true);
         s_Facts.same_entity = Field<bool>::Observed(p_Same);
         return s_Facts;
@@ -219,6 +220,7 @@ namespace
         s_Candidate.lookup = GoodLookup(false); // a different entity from the local hero
         s_Candidate.lookup.subentity_count = Field<int64_t>::Observed(3);
         s_Candidate.lookup.index = Field<int64_t>::Observed(0);
+        s_Candidate.lookup.index_check = Field<std::string>::Observed("in_range");
         s_Candidate.identity = HeroIdentity(k_Agent48, k_HitmenBrick);
         s_Candidate.identity.x = Field<double>::Observed(-40.99882);
         s_Candidate.identity.y = Field<double>::Observed(-24.293657);
@@ -366,6 +368,7 @@ void RunPlayerInspectionTests()
 
         LookupFacts s_NotSub = GoodLookup();
         s_NotSub.index = Field<int64_t>::Observed(-1);
+        s_NotSub.index_check = Field<std::string>::Observed("negative");
         s_NotSub.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
         CHECK(PlayerObservation::ClassifyRoundTrip(s_NotSub) == RoundTrip::HeroNotRepresentable);
 
@@ -408,16 +411,16 @@ void RunPlayerInspectionTests()
 
         OutfitObservation::Entries s_Entity;
         PlayerObservation::AppendEntity(s_Entity, GoodEntity());
-        CHECK(s_Entity.size() == 5 + 14 + 7 + 3); // 29: bricks (count, 3 id fields, truncated), hero (resolved + 13), round trip, candidate echo + absent
+        CHECK(s_Entity.size() == 5 + 14 + 8 + 3); // 30: bricks (count, 3 id fields, truncated), hero (resolved + 13), round trip (incl. the index check), candidate echo + absent
 
         OutfitObservation::Entries s_Present;
         PlayerObservation::AppendEntity(s_Present, WithCandidatePresent(GoodEntity()));
-        CHECK(s_Present.size() == 29 + 13); // + the candidate's 7 lookup fields and 6 compact identity fields
+        CHECK(s_Present.size() == 30 + 14); // + the candidate's 8 lookup fields and 6 compact identity fields
         CHECK(s_Present.size() + 4 <= k_MaxObservedEntries); // plus the scheduler's four frame values
 
         OutfitObservation::Entries s_Empty;
         PlayerObservation::AppendEntity(s_Empty, GoodEntity(0));
-        CHECK(s_Empty.size() == 2 + 14 + 7 + 3); // no brick_ids_ field at all
+        CHECK(s_Empty.size() == 2 + 14 + 8 + 3); // no brick_ids_ field at all
 
         // every unavailable field with a full-length reason still fits the line
         Result s_Worst;
@@ -635,11 +638,11 @@ void RunPlayerInspectionTests()
         CHECK(NumberField(s_Result, "hero_x", -0.035) && NumberField(s_Result, "hero_y", -3.832) && NumberField(s_Result, "hero_z", -0.413));
         CHECK(BoolField(s_Result, "hero_transform_dirty", false) && IntField(s_Result, "hero_room_behaviour") == 1);
         CHECK(TextField(s_Result, "rt_outcome") == "same_entity" && BoolField(s_Result, "rt_owner_found", true) && BoolField(s_Result, "rt_factory_template", true));
-        CHECK(IntField(s_Result, "rt_subentity_count") == 2 && IntField(s_Result, "rt_index") == 1 && BoolField(s_Result, "rt_resolved", true) && BoolField(s_Result, "rt_same_entity", true));
+        CHECK(IntField(s_Result, "rt_subentity_count") == 2 && IntField(s_Result, "rt_index") == 1 && TextField(s_Result, "rt_index_check") == "in_range" && BoolField(s_Result, "rt_resolved", true) && BoolField(s_Result, "rt_same_entity", true));
         CHECK(TextField(s_Result, "cand_brick") == k_HitmenBrick && TextField(s_Result, "cand_entity_id") == k_Agent48 && BoolField(s_Result, "cand_brick_present", false));
-        CHECK(!Observed(s_Result, "cand_index") && !Observed(s_Result, "cand_distinct_from_local") && !Observed(s_Result, "cand_x"));
+        CHECK(!Observed(s_Result, "cand_index") && !Observed(s_Result, "cand_index_check") && !Observed(s_Result, "cand_distinct_from_local") && !Observed(s_Result, "cand_x"));
         CHECK(BoolField(s_Result, "reads_on_frame", true));
-        CHECK(s_Result.observed.size() == 33 && EncodeResult(s_Result).size() <= k_MaxLineBytes);
+        CHECK(s_Result.observed.size() == 34 && EncodeResult(s_Result).size() <= k_MaxLineBytes);
         CHECK(s_Stats.entities_inspected == 1 && s_Stats.players_inspected == 0 && s_Stats.reduced == 0);
     }
 
@@ -656,13 +659,13 @@ void RunPlayerInspectionTests()
     {
         const Result s_Result = RunEntity(Frame(100, 5000, true), [](const EntityQuery&) { return WithCandidatePresent(GoodEntity()); }, EntityCommand(CommandTest::Uuid(1)));
         CHECK(BoolField(s_Result, "cand_brick_present", true) && BoolField(s_Result, "cand_factory_template", true));
-        CHECK(IntField(s_Result, "cand_subentity_count") == 3 && IntField(s_Result, "cand_index") == 0 && BoolField(s_Result, "cand_resolved", true));
+        CHECK(IntField(s_Result, "cand_subentity_count") == 3 && IntField(s_Result, "cand_index") == 0 && TextField(s_Result, "cand_index_check") == "in_range" && BoolField(s_Result, "cand_resolved", true));
         CHECK(BoolField(s_Result, "cand_hitman5", true) && BoolField(s_Result, "cand_spatial", true) && BoolField(s_Result, "cand_distinct_from_local", true));
         CHECK(TextField(s_Result, "cand_entity_id") == k_Agent48 && IntField(s_Result, "cand_entity_flags") == 7 && TextField(s_Result, "cand_character_id") == "787c1ff2-467c-421d-98f4-6bbb92e5fc99");
         CHECK(CountPrefixed(s_Result, "cand_entity_id") == 1); // the echo once; the compact identity does not repeat it
         CHECK(NumberField(s_Result, "cand_x", -40.99882) && NumberField(s_Result, "cand_y", -24.293657) && NumberField(s_Result, "cand_z", 0.4925565) && BoolField(s_Result, "cand_transform_dirty", false));
         CHECK(!Observed(s_Result, "cand_activated") && !Observed(s_Result, "cand_owning_brick")); // the compact identity
-        CHECK(s_Result.observed.size() == 33 + 13 && s_Result.observed.size() <= k_MaxObservedEntries);
+        CHECK(s_Result.observed.size() == 34 + 14 && s_Result.observed.size() <= k_MaxObservedEntries);
         CHECK(EncodeResult(s_Result).size() <= k_MaxLineBytes && s_Result.reason.empty());
 
         // the candidate resolving to the local hero's own entity is reported as not distinct
@@ -707,12 +710,13 @@ void RunPlayerInspectionTests()
             s_Reads.round_trip.factory_template = Field<bool>::Observed(false);
             s_Reads.round_trip.subentity_count = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
             s_Reads.round_trip.index = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+            s_Reads.round_trip.index_check = Field<std::string>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
             s_Reads.round_trip.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
             s_Reads.round_trip.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
             s_Reads.round_trip_outcome = PlayerObservation::ClassifyRoundTrip(s_Reads.round_trip);
             return s_Reads;
         }, EntityCommand(CommandTest::Uuid(1)));
-        CHECK(TextField(s_Result, "rt_outcome") == "factory_unavailable" && BoolField(s_Result, "rt_factory_template", false) && FieldIs(s_Result, "rt_subentity_count", FieldStatus::Unavailable));
+        CHECK(TextField(s_Result, "rt_outcome") == "factory_unavailable" && BoolField(s_Result, "rt_factory_template", false) && FieldIs(s_Result, "rt_subentity_count", FieldStatus::Unavailable) && FieldIs(s_Result, "rt_index_check", FieldStatus::Unavailable));
     }
 
     // ---- the hero's id is not a sub-entity of its owner's factory; and a null sub-entity ---------
@@ -720,12 +724,13 @@ void RunPlayerInspectionTests()
         const Result s_Missing = RunEntity(Frame(100, 5000, true), [](const EntityQuery&) {
             auto s_Reads = GoodEntity();
             s_Reads.round_trip.index = Field<int64_t>::Observed(-1);
+            s_Reads.round_trip.index_check = Field<std::string>::Observed("negative");
             s_Reads.round_trip.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
             s_Reads.round_trip.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
             s_Reads.round_trip_outcome = PlayerObservation::ClassifyRoundTrip(s_Reads.round_trip);
             return s_Reads;
         }, EntityCommand(CommandTest::Uuid(1)));
-        CHECK(TextField(s_Missing, "rt_outcome") == "hero_not_representable" && IntField(s_Missing, "rt_index") == -1);
+        CHECK(TextField(s_Missing, "rt_outcome") == "hero_not_representable" && IntField(s_Missing, "rt_index") == -1 && TextField(s_Missing, "rt_index_check") == "negative");
 
         const Result s_Null = RunEntity(Frame(100, 5000, true), [](const EntityQuery&) {
             auto s_Reads = GoodEntity();
@@ -750,7 +755,7 @@ void RunPlayerInspectionTests()
         CHECK(IntField(s_Result, "brick_count") == 5 && CountPrefixed(s_Result, "brick_ids_") == 1 && BoolField(s_Result, "bricks_truncated", false));
         CHECK(FieldIs(s_Result, "hero_resolved", FieldStatus::Unavailable) && FieldIs(s_Result, "hero_entity_id", FieldStatus::Unavailable) && FieldIs(s_Result, "hero_x", FieldStatus::Unavailable));
         CHECK(Reason(s_Result, "hero_entity_id") == "hero entity reference null");
-        CHECK(TextField(s_Result, "rt_outcome") == "unsupported" && FieldIs(s_Result, "rt_owner_found", FieldStatus::Unavailable));
+        CHECK(TextField(s_Result, "rt_outcome") == "unsupported" && FieldIs(s_Result, "rt_owner_found", FieldStatus::Unavailable) && FieldIs(s_Result, "rt_index_check", FieldStatus::Unavailable));
     }
 
     // ---- a dirty transform and invalid flags are reported, never corrected ----------------------

@@ -22,9 +22,40 @@ namespace PlayerObservation
         return "unsupported";
     }
 
-    // Only a demonstrably valid lookup (owner found, a template factory, a non-negative index, a
-    // resolved entity) returning a different entity is the specific failure of the lookup contract;
-    // every earlier gap is named for what it is, and a read that did not happen is unsupported.
+    const char* IndexCheckText(IndexCheck p_Check)
+    {
+        switch (p_Check)
+        {
+            case IndexCheck::InRange: return "in_range";
+            case IndexCheck::Negative: return "negative";
+            case IndexCheck::OutOfRange: return "out_of_range";
+            case IndexCheck::CountInvalid: return "count_invalid";
+        }
+
+        return "count_invalid";
+    }
+
+    bool SubEntityCountValid(int64_t p_Count)
+    {
+        return p_Count >= 0 && p_Count <= k_MaxSubEntityCount;
+    }
+
+    IndexCheck CheckSubEntityIndex(int64_t p_Count, int64_t p_Index)
+    {
+        if (!SubEntityCountValid(p_Count))
+            return IndexCheck::CountInvalid;
+        if (p_Index < 0)
+            return IndexCheck::Negative;
+        if (p_Index >= p_Count)
+            return IndexCheck::OutOfRange;
+        return IndexCheck::InRange;
+    }
+
+    // Only a demonstrably valid lookup (owner found, a template factory, an index checked in range,
+    // a resolved entity) returning a different entity is the specific failure of the lookup contract;
+    // every earlier gap is named for what it is, and a read that did not happen is unsupported. A
+    // negative index is the factory's "not a sub-entity" answer; an out-of-range index or an invalid
+    // count is an inconsistent factory answer (index_check says which) and is inconclusive.
     RoundTrip ClassifyRoundTrip(const LookupFacts& p_Facts)
     {
         if (!p_Facts.owner_found.observed())
@@ -41,6 +72,8 @@ namespace PlayerObservation
             return RoundTrip::Unsupported;
         if (*p_Facts.index.value < 0)
             return RoundTrip::HeroNotRepresentable;
+        if (!p_Facts.index_check.observed() || *p_Facts.index_check.value != IndexCheckText(IndexCheck::InRange))
+            return RoundTrip::Unsupported;
 
         if (!p_Facts.resolved.observed() || !*p_Facts.resolved.value || !p_Facts.same_entity.observed())
             return RoundTrip::Unsupported;
@@ -200,8 +233,8 @@ namespace PlayerObservation
         Append(p_Out, "slot0_matches_m5", p_Reads.slot0_matches_m5);
     }
 
-    // At most 5 (bricks) + 14 (hero) + 7 (round trip) + 3 + 13 (candidate when present) = 42; the
-    // scheduler adds four plain frame values (46 ≤ 48). Without a present candidate: 29 (+ 4).
+    // At most 5 (bricks) + 14 (hero) + 8 (round trip) + 3 + 14 (candidate when present) = 44; the
+    // scheduler adds four plain frame values (48 ≤ 48). Without a present candidate: 30 (+ 4).
     void AppendEntity(Entries& p_Out, const EntityReads& p_Reads)
     {
         Append(p_Out, "brick_count", p_Reads.bricks.count);
@@ -218,6 +251,7 @@ namespace PlayerObservation
         Append(p_Out, "rt_factory_template", p_Reads.round_trip.factory_template);
         Append(p_Out, "rt_subentity_count", p_Reads.round_trip.subentity_count);
         Append(p_Out, "rt_index", p_Reads.round_trip.index);
+        Append(p_Out, "rt_index_check", p_Reads.round_trip.index_check);
         Append(p_Out, "rt_resolved", p_Reads.round_trip.resolved);
         Append(p_Out, "rt_same_entity", p_Reads.round_trip.same_entity);
 
@@ -233,6 +267,7 @@ namespace PlayerObservation
                 Append(p_Out, "cand_factory_template", s_Candidate.lookup.factory_template);
                 Append(p_Out, "cand_subentity_count", s_Candidate.lookup.subentity_count);
                 Append(p_Out, "cand_index", s_Candidate.lookup.index);
+                Append(p_Out, "cand_index_check", s_Candidate.lookup.index_check);
                 Append(p_Out, "cand_resolved", s_Candidate.lookup.resolved);
                 Append(p_Out, "cand_hitman5", s_Candidate.hitman5_resolved);
                 Append(p_Out, "cand_spatial", s_Candidate.spatial_resolved);
@@ -283,6 +318,7 @@ namespace PlayerObservation
         p_Facts.factory_template = Marked<bool>(p_Status, p_Reason);
         p_Facts.subentity_count = Marked<int64_t>(p_Status, p_Reason);
         p_Facts.index = Marked<int64_t>(p_Status, p_Reason);
+        p_Facts.index_check = Marked<std::string>(p_Status, p_Reason);
         p_Facts.resolved = Marked<bool>(p_Status, p_Reason);
         p_Facts.same_entity = Marked<bool>(p_Status, p_Reason);
     }

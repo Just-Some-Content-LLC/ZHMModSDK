@@ -422,12 +422,18 @@ namespace
     }
 
     // The blueprint-factory lookup, each step its own boundary: the owner exists; its factory is
-    // non-null; the factory's vtable is the template entity blueprint factory's; the sub-entity count
-    // and the index of the authored id; the sub-entity at that index; its equality with the
-    // reference entity (pointer equality on this frame — an observation). The resolved reference is
-    // handed back for this frame's reads only.
+    // non-null; the factory's vtable is the template entity blueprint factory's; the sub-entity count,
+    // valid (correction A: non-negative, within the plausibility bound) before the index of the
+    // authored id is looked up; that index checked inside [0, count) before the one sub-entity access;
+    // the sub-entity's equality with the reference entity (pointer equality on this frame — an
+    // observation). A negative index is the factory's "not a sub-entity" answer; an index at or beyond
+    // the count, or an invalid count, is an inconsistent factory answer, reported as such, and
+    // GetSubEntity is never called for it. The resolved reference is handed back for this frame's
+    // reads only.
     void Lookup(const ZEntityRef& p_Owner, uint64_t p_EntityId, const ZEntityRef& p_Reference, LookupFacts& p_Out, ZEntityRef* p_Resolved)
     {
+        using PlayerObservation::IndexCheck;
+
         p_Out.owner_found = Field<bool>::Observed(static_cast<bool>(p_Owner));
         if (!p_Owner)
         {
@@ -443,6 +449,7 @@ namespace
             p_Out.factory_template = Field<bool>::Of(FieldStatus::Unavailable, "blueprint factory null");
             p_Out.subentity_count = Field<int64_t>::Of(FieldStatus::Unavailable, "blueprint factory null");
             p_Out.index = Field<int64_t>::Of(FieldStatus::Unavailable, "blueprint factory null");
+            p_Out.index_check = Field<std::string>::Of(FieldStatus::Unavailable, "blueprint factory null");
             p_Out.resolved = Field<bool>::Of(FieldStatus::Unavailable, "blueprint factory null");
             p_Out.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "blueprint factory null");
             return;
@@ -454,22 +461,44 @@ namespace
         {
             p_Out.subentity_count = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
             p_Out.index = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+            p_Out.index_check = Field<std::string>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
             p_Out.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
             p_Out.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
             return;
         }
 
-        p_Out.subentity_count = Field<int64_t>::Observed(s_Factory->GetSubEntitiesCount());
-        const int s_Index = s_Factory->GetSubEntityIndex(p_EntityId);
+        // The count as read, then its validity: an invalid count stops the lookup before the index
+        // is even asked for (the factory's answers are not trusted past an invalid one).
+        const int64_t s_Count = s_Factory->GetSubEntitiesCount();
+        p_Out.subentity_count = Field<int64_t>::Observed(s_Count);
+        if (!PlayerObservation::SubEntityCountValid(s_Count))
+        {
+            p_Out.index = Field<int64_t>::Of(FieldStatus::Unavailable, "count invalid; index not looked up");
+            p_Out.index_check = Field<std::string>::Observed(PlayerObservation::IndexCheckText(IndexCheck::CountInvalid));
+            p_Out.resolved = Field<bool>::Of(FieldStatus::Inconsistent, "sub-entity count invalid");
+            p_Out.same_entity = Field<bool>::Of(FieldStatus::Inconsistent, "sub-entity count invalid");
+            return;
+        }
+
+        const int64_t s_Index = s_Factory->GetSubEntityIndex(p_EntityId);
         p_Out.index = Field<int64_t>::Observed(s_Index);
-        if (s_Index < 0)
+        const IndexCheck s_Check = PlayerObservation::CheckSubEntityIndex(s_Count, s_Index);
+        p_Out.index_check = Field<std::string>::Observed(PlayerObservation::IndexCheckText(s_Check));
+        if (s_Check == IndexCheck::Negative)
         {
             p_Out.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
             p_Out.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
             return;
         }
+        if (s_Check != IndexCheck::InRange)
+        {
+            p_Out.resolved = Field<bool>::Of(FieldStatus::Inconsistent, "index outside the sub-entity count");
+            p_Out.same_entity = Field<bool>::Of(FieldStatus::Inconsistent, "index outside the sub-entity count");
+            return;
+        }
 
-        const ZEntityRef s_Sub(s_Factory->GetSubEntity(p_Owner.m_pObj, s_Index));
+        // The one sub-entity access, reached only with a valid count and an index inside it.
+        const ZEntityRef s_Sub(s_Factory->GetSubEntity(p_Owner.m_pObj, static_cast<int>(s_Index)));
         p_Out.resolved = Field<bool>::Observed(static_cast<bool>(s_Sub));
         if (!s_Sub)
         {

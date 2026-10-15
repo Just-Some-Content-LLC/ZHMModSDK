@@ -326,6 +326,7 @@ namespace
             {
                 s_Trip.subentity_count = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
                 s_Trip.index = Field<int64_t>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
+                s_Trip.index_check = Field<std::string>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
                 s_Trip.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
                 s_Trip.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a template entity blueprint factory");
             }
@@ -333,6 +334,7 @@ namespace
             {
                 s_Trip.subentity_count = Field<int64_t>::Observed(2);
                 s_Trip.index = Field<int64_t>::Observed(-1);
+                s_Trip.index_check = Field<std::string>::Observed(PlayerObservation::IndexCheckText(PlayerObservation::IndexCheck::Negative));
                 s_Trip.resolved = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
                 s_Trip.same_entity = Field<bool>::Of(FieldStatus::Unavailable, "not a sub-entity of that factory");
             }
@@ -340,6 +342,7 @@ namespace
             {
                 s_Trip.subentity_count = Field<int64_t>::Observed(2);
                 s_Trip.index = Field<int64_t>::Observed(1);
+                s_Trip.index_check = Field<std::string>::Observed(PlayerObservation::IndexCheckText(PlayerObservation::IndexCheck::InRange));
                 s_Trip.resolved = Field<bool>::Observed(true);
                 s_Trip.same_entity = Field<bool>::Observed(p_Mode != "roundtrip-different");
             }
@@ -358,6 +361,7 @@ namespace
             s_Candidate.lookup.factory_template = Field<bool>::Observed(true);
             s_Candidate.lookup.subentity_count = Field<int64_t>::Observed(3);
             s_Candidate.lookup.index = Field<int64_t>::Observed(0);
+            s_Candidate.lookup.index_check = Field<std::string>::Observed(PlayerObservation::IndexCheckText(PlayerObservation::IndexCheck::InRange));
             s_Candidate.lookup.resolved = Field<bool>::Observed(true);
             s_Candidate.lookup.same_entity = Field<bool>::Observed(false);
             s_Candidate.identity = FakeIdentity(s_EntityId.c_str(), s_Brick.c_str(), -40.99882, -24.293657, 0.4925565, p_Mode);
