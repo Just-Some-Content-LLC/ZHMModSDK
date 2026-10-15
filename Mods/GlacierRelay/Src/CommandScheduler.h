@@ -97,6 +97,7 @@ public:
         // M6-B1
         uint64_t players_inspected = 0;  // relay.inspect.players applied
         uint64_t entities_inspected = 0; // relay.inspect.entity applied
+        uint64_t unbounded = 0;          // M6-B1 hardening B: a result still over the line bound after reduction (never emitted as valid; expected 0)
         uint32_t first_thread_id = 0;
         uint32_t last_thread_id = 0;
         bool thread_changed = false; // the scheduler was invoked from more than one thread
@@ -118,10 +119,21 @@ public:
 
     Stats GetStats() const { return m_Stats; }
 
-    // M6-B1: drops observed entries from the end (and every reason) until the encoded line fits
-    // the protocol's bound, then marks the result reduced. Returns true when a reduction happened.
-    // Static and public so the bound is testable without a frame source.
+    // M6-B1 (hardened in the M6-B1 hardening stage, correction B): reduces a result until its
+    // ACTUAL encoded line — escaped strings in their encoded form, the encoder's own truncations,
+    // the trailing newline — fits the protocol's bound, measuring again after every marker entry
+    // and every reason note it adds, so the result the caller emits is the one that was measured.
+    // Stage 1 drops the per-field reasons (every field keeps its status and value); stage 2 drops
+    // plain entries from the end one at a time. Every reduction is marked by an entry
+    // ("reasons_dropped", "observed_reduced") and by a note appended to the result's own reason
+    // (the note always survives the encoder's reason bound). Status, command identity, link
+    // identity, adapter identity, frame and mission generation are never touched. Returns true
+    // when a reduction happened. Static and public so the bound is testable without a frame source.
     static bool ReduceToFit(CommandProtocol::Result& p_Result);
+
+    // The invariant itself, on the actual encoding: the caller checks it after ReduceToFit and
+    // never emits an oversized result as though it were valid.
+    static bool WithinLineBound(const CommandProtocol::Result& p_Result);
 
 private:
     CommandProtocol::Result Base(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame) const;

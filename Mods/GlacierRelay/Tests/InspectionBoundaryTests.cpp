@@ -2,9 +2,13 @@
 // pure rule the DLL applies and on the scheduler's encoding of a FAKE read set that reports the
 // corresponding engine answer. Correction A: the blueprint-factory index bounds (a valid count
 // before use, an index inside [0, count) before the one sub-entity access, a negative index kept
-// distinct from a non-negative out-of-bounds one, every refusal a typed observation). Fake values
-// only: no engine pointer is constructed, valid or invalid; no memory is written; no setter exists
-// on this path.
+// distinct from a non-negative out-of-bounds one, every refusal a typed observation). Correction B:
+// the final wire-length invariant (every reduction decided and re-checked on the actual encoded
+// line, escapes and the encoder's truncations included, after every marker and note; near-boundary
+// results, maximal texts, maximal reasons, JSON escaping, both stages, the entry cap, the reason
+// bound, the maximal header, metadata preserved, the scheduler's own re-check; the final encoded
+// byte length asserted in every case). Fake values only: no engine pointer is constructed, valid or
+// invalid; no memory is written; no setter exists on this path.
 #include "TestHarness.h"
 
 #include <cstring>
@@ -249,6 +253,102 @@ namespace
             *p_Stats = s_Scheduler.GetStats();
         return s_Results.empty() ? Result{} : s_Results[0];
     }
+
+    // ---- correction B helpers ------------------------------------------------------------------------
+
+    // A result header with every text at the encoder's bound (the native_at and mission generation
+    // at 64 bytes, the largest link generation and frame), a version-2 line: the header the line
+    // bound has to leave room for.
+    Result MaximalHeader(const std::string& p_Reason = "")
+    {
+        Result s_Result;
+        s_Result.protocol_version = k_ProtocolVersion2;
+        s_Result.command_id = CommandTest::Uuid(1);
+        s_Result.link_generation = UINT64_MAX;
+        s_Result.adapter_instance_id = CommandTest::Uuid(99);
+        s_Result.status = Status::Applied;
+        s_Result.reason = p_Reason;
+        s_Result.native_at = std::string(64, 'n');
+        s_Result.frame = UINT64_MAX;
+        s_Result.mission_generation = std::string(64, 'g');
+        return s_Result;
+    }
+
+    size_t Encoded(const Result& p_Result)
+    {
+        return EncodeResult(p_Result).size();
+    }
+
+    size_t MarkerCount(const Result& p_Result)
+    {
+        size_t s_Count = 0;
+        for (const auto& s_Entry : p_Result.observed)
+            if (s_Entry.first == "reasons_dropped" || s_Entry.first == "observed_reduced")
+                ++s_Count;
+        return s_Count;
+    }
+
+    bool MarkersLast(const Result& p_Result)
+    {
+        const size_t s_Count = MarkerCount(p_Result);
+        if (s_Count == 0 || p_Result.observed.size() < s_Count)
+            return false;
+        for (size_t i = p_Result.observed.size() - s_Count; i < p_Result.observed.size(); ++i)
+            if (p_Result.observed[i].first != "reasons_dropped" && p_Result.observed[i].first != "observed_reduced")
+                return false;
+        return p_Result.observed.back().first == (s_Count == 2 ? "observed_reduced" : "reasons_dropped");
+    }
+
+    // The metadata ReduceToFit must never touch.
+    bool SameMetadata(const Result& p_Before, const Result& p_After)
+    {
+        return p_Before.protocol_version == p_After.protocol_version && p_Before.command_id == p_After.command_id && p_Before.link_generation == p_After.link_generation
+            && p_Before.adapter_instance_id == p_After.adapter_instance_id && p_Before.status == p_After.status && p_Before.native_at == p_After.native_at
+            && p_Before.frame == p_After.frame && p_Before.mission_generation == p_After.mission_generation;
+    }
+
+    // The raw (unencoded) byte count of the observed texts and keys: what a naive measure would add up.
+    size_t RawTextBytes(const Result& p_Result)
+    {
+        size_t s_Bytes = 0;
+        for (const auto& s_Entry : p_Result.observed)
+            s_Bytes += s_Entry.first.size() + s_Entry.second.text.size() + s_Entry.second.field_reason.size();
+        return s_Bytes;
+    }
+
+    void AppendText(Result& p_Result, const std::string& p_Name, const std::string& p_Text)
+    {
+        OutfitObservation::Append(p_Result.observed, p_Name.c_str(), Field<std::string>::Observed(p_Text));
+    }
+
+    void AppendUnavailable(Result& p_Result, const std::string& p_Name, const std::string& p_Reason)
+    {
+        OutfitObservation::Append(p_Result.observed, p_Name.c_str(), Field<std::string>::Of(FieldStatus::Unavailable, p_Reason));
+    }
+
+    // A result whose encoded line is exactly p_Target bytes: the per-field cost of a 64-byte text
+    // field with a two-digit name is measured once; enough of them are added to come within the
+    // text bound of the target; the last field's text is sized to land on it exactly (asserted).
+    Result ExactlySized(size_t p_Target)
+    {
+        Result s_Result = MaximalHeader();
+        Result s_Probe = s_Result;
+        AppendText(s_Probe, "last", "");
+        const size_t s_Base = Encoded(s_Probe);
+        AppendText(s_Probe, "f_10", std::string(64, 'x'));
+        const size_t s_Delta = Encoded(s_Probe) - s_Base;
+        CHECK(s_Delta > 64 && s_Delta < k_MaxObservedTextBytes);
+        const size_t s_Fields = p_Target > s_Base + k_MaxObservedTextBytes ? (p_Target - s_Base - k_MaxObservedTextBytes) / s_Delta + 1 : 0;
+        CHECK(s_Fields < 90);
+        for (size_t i = 0; i < s_Fields; ++i)
+            AppendText(s_Result, "f_" + std::to_string(10 + i), std::string(64, 'x'));
+        AppendText(s_Result, "last", "");
+        const size_t s_Empty = Encoded(s_Result);
+        CHECK(s_Empty <= p_Target && p_Target - s_Empty <= k_MaxObservedTextBytes);
+        s_Result.observed.back().second.text = std::string(p_Target - s_Empty, 'y');
+        CHECK(Encoded(s_Result) == p_Target);
+        return s_Result;
+    }
 }
 
 void RunInspectionBoundaryTests()
@@ -400,5 +500,218 @@ void RunInspectionBoundaryTests()
         CHECK(FieldIs(s_None, "rt_index_check", FieldStatus::Unsupported) && TextField(s_None, "rt_outcome") == "unsupported");
         const Result s_Fault = RunEntity(Frame(100, 5000, true), [](const EntityQuery& p_Query) { return PlayerObservation::AllEntity(FieldStatus::Unavailable, "fault during the entity reads", p_Query); }, EntityCommand(CommandTest::Uuid(2)));
         CHECK(FieldIs(s_Fault, "rt_index_check", FieldStatus::Unavailable) && Reason(s_Fault, "rt_index_check") == "fault during the entity reads" && TextField(s_Fault, "rt_outcome") == "unsupported");
+    }
+
+    // ==== Correction B: the final wire-length invariant =============================================
+
+    // ---- near the boundary: exactly at the bound nothing happens; one byte over is reduced ---------
+    {
+        Result s_At = ExactlySized(k_MaxLineBytes);
+        CHECK(Encoded(s_At) == k_MaxLineBytes);
+        const Result s_AtBefore = s_At;
+        CHECK(!CommandScheduler::ReduceToFit(s_At));
+        CHECK(Encoded(s_At) == k_MaxLineBytes && s_At.reason.empty() && MarkerCount(s_At) == 0 && s_At.observed.size() == s_AtBefore.observed.size());
+        CHECK(CommandScheduler::WithinLineBound(s_At));
+
+        Result s_Under = ExactlySized(k_MaxLineBytes - 1);
+        CHECK(Encoded(s_Under) == k_MaxLineBytes - 1 && !CommandScheduler::ReduceToFit(s_Under) && Encoded(s_Under) == k_MaxLineBytes - 1);
+
+        Result s_Over = ExactlySized(k_MaxLineBytes + 1);
+        CHECK(Encoded(s_Over) == k_MaxLineBytes + 1);
+        const Result s_OverBefore = s_Over;
+        CHECK(CommandScheduler::ReduceToFit(s_Over));
+        const size_t s_Final = Encoded(s_Over);
+        CHECK(s_Final <= k_MaxLineBytes);
+        // no field reasons existed, so the first stage alone could not have brought the line back:
+        // entries were dropped, both markers are last, both notes are in the reason
+        CHECK(MarkerCount(s_Over) == 2 && MarkersLast(s_Over));
+        CHECK(s_Over.reason.find("field reasons dropped") != std::string::npos && s_Over.reason.find("inspection reduced") != std::string::npos);
+        CHECK(s_Over.observed.size() < s_OverBefore.observed.size() + 2);
+        CHECK(SameMetadata(s_OverBefore, s_Over));
+        CHECK(CommandScheduler::WithinLineBound(s_Over));
+        std::printf("line bound: one byte over the bound (%zu) reduced to %zu bytes, %zu of %zu plain entries kept\n", k_MaxLineBytes + 1, s_Final, s_Over.observed.size() - 2, s_OverBefore.observed.size());
+
+        // the reduction is the measured one: dropping one fewer entry would not have fit
+        Result s_OneMore = s_Over;
+        const size_t s_KeptPlain = s_Over.observed.size() - 2;
+        s_OneMore.observed.insert(s_OneMore.observed.begin() + static_cast<std::ptrdiff_t>(s_KeptPlain), s_OverBefore.observed[s_KeptPlain]);
+        CHECK(Encoded(s_OneMore) > k_MaxLineBytes);
+
+        // already reduced: a second call finds it within the bound and changes nothing
+        const Result s_Again = s_Over;
+        CHECK(!CommandScheduler::ReduceToFit(s_Over) && Encoded(s_Over) == s_Final && s_Over.reason == s_Again.reason && s_Over.observed.size() == s_Again.observed.size());
+    }
+
+    // ---- maximal field texts: 48 entries at the text bound, dropped from the end until it fits ---
+    {
+        Result s_Result = MaximalHeader();
+        for (int i = 0; i < 48; ++i)
+            AppendText(s_Result, "field_" + std::to_string(i), std::string(k_MaxObservedTextBytes, 'x'));
+        const Result s_Before = s_Result;
+        const size_t s_Initial = Encoded(s_Result);
+        CHECK(s_Initial > k_MaxLineBytes);
+        CHECK(CommandScheduler::ReduceToFit(s_Result));
+        const size_t s_Final = Encoded(s_Result);
+        CHECK(s_Final <= k_MaxLineBytes);
+        CHECK(MarkerCount(s_Result) == 2 && MarkersLast(s_Result) && s_Result.observed.size() <= k_MaxObservedEntries);
+        // the kept entries are the first ones, intact (value, status, text at its full length)
+        for (size_t i = 0; i + 2 < s_Result.observed.size(); ++i)
+            CHECK(s_Result.observed[i].first == "field_" + std::to_string(i) && s_Result.observed[i].second.text.size() == k_MaxObservedTextBytes && s_Result.observed[i].second.field_status && *s_Result.observed[i].second.field_status == FieldStatus::Observed);
+        CHECK(SameMetadata(s_Before, s_Result));
+        std::printf("line bound: 48 maximal texts %zu bytes reduced to %zu bytes, %zu plain entries kept\n", s_Initial, s_Final, s_Result.observed.size() - 2);
+    }
+
+    // ---- maximal reasons: the first stage keeps every field and status; the entry cap rule --------
+    {
+        // 46 entries (the players inspection's count) unavailable with 40-byte reasons: over the
+        // bound with the reasons, within it without them; only the reasons go
+        Result s_Result = MaximalHeader("engine reads unsupported on this frame source; frame values only");
+        for (int i = 0; i < 46; ++i)
+            AppendUnavailable(s_Result, "field_" + std::to_string(i), std::string(k_MaxObservedReasonBytes, 'r'));
+        const Result s_Before = s_Result;
+        const size_t s_Initial = Encoded(s_Result);
+        CHECK(s_Initial > k_MaxLineBytes);
+        CHECK(CommandScheduler::ReduceToFit(s_Result));
+        const size_t s_Final = Encoded(s_Result);
+        CHECK(s_Final <= k_MaxLineBytes);
+        CHECK(s_Result.observed.size() == 47 && MarkerCount(s_Result) == 1 && s_Result.observed.back().first == "reasons_dropped");
+        for (size_t i = 0; i < 46; ++i)
+            CHECK(s_Result.observed[i].first == "field_" + std::to_string(i) && s_Result.observed[i].second.field_status && *s_Result.observed[i].second.field_status == FieldStatus::Unavailable && s_Result.observed[i].second.field_reason.empty());
+        CHECK(s_Result.reason == "engine reads unsupported on this frame source; frame values only; field reasons dropped to fit the result line bound");
+        CHECK(SameMetadata(s_Before, s_Result));
+        std::printf("line bound: 46 maximal reasons %zu bytes reduced to %zu bytes by dropping the reasons only\n", s_Initial, s_Final);
+
+        // at the entry cap (48) the first-stage marker takes the place of the last entry, which
+        // makes it an entry drop too: both markers, both notes, 46 plain entries kept with status
+        Result s_Cap = MaximalHeader();
+        for (int i = 0; i < 48; ++i)
+            AppendUnavailable(s_Cap, "field_" + std::to_string(i), std::string(k_MaxObservedReasonBytes, 'r'));
+        CHECK(Encoded(s_Cap) > k_MaxLineBytes);
+        CHECK(CommandScheduler::ReduceToFit(s_Cap));
+        CHECK(Encoded(s_Cap) <= k_MaxLineBytes);
+        CHECK(s_Cap.observed.size() == 48 && MarkerCount(s_Cap) == 2 && MarkersLast(s_Cap));
+        CHECK(s_Cap.observed[45].first == "field_45" && s_Cap.observed[45].second.field_reason.empty() && *s_Cap.observed[45].second.field_status == FieldStatus::Unavailable);
+        CHECK(s_Cap.reason == "field reasons dropped to fit the result line bound; inspection reduced to fit the result line bound");
+    }
+
+    // ---- JSON escaping: measured in the encoded form, never the raw one --------------------------
+    {
+        // quotation marks double on the wire; control characters become six bytes each. The raw
+        // text bytes sum well under the bound; the encoded line does not.
+        Result s_Result = MaximalHeader();
+        for (int i = 0; i < 10; ++i)
+            AppendText(s_Result, "q_" + std::to_string(i), std::string(k_MaxObservedTextBytes, '"'));
+        for (int i = 0; i < 4; ++i)
+            AppendText(s_Result, "c_" + std::to_string(i), std::string(k_MaxObservedTextBytes, '\x01'));
+        AppendText(s_Result, "b", std::string(k_MaxObservedTextBytes, '\\'));
+        const Result s_Before = s_Result;
+        const size_t s_Raw = RawTextBytes(s_Result);
+        const size_t s_Initial = Encoded(s_Result);
+        CHECK(s_Raw < k_MaxLineBytes && s_Initial > k_MaxLineBytes);
+        CHECK(CommandScheduler::ReduceToFit(s_Result));
+        const size_t s_Final = Encoded(s_Result);
+        CHECK(s_Final <= k_MaxLineBytes && MarkerCount(s_Result) == 2 && MarkersLast(s_Result) && SameMetadata(s_Before, s_Result));
+        // a text kept is kept whole: the encoder escapes it, the reduction never edits it
+        CHECK(!s_Result.observed.empty() && s_Result.observed[0].second.text == std::string(k_MaxObservedTextBytes, '"'));
+        CHECK(EncodeResult(s_Result).find(std::string(16, '\\')) != std::string::npos || EncodeResult(s_Result).find("\\\"\\\"") != std::string::npos);
+        std::printf("line bound: escaped texts raw %zu bytes, encoded %zu bytes, reduced to %zu bytes with %zu plain entries kept\n", s_Raw, s_Initial, s_Final, s_Result.observed.size() - 2);
+
+        // the same with reasons: an escaped reason is measured in its encoded form too
+        Result s_Reasons = MaximalHeader();
+        for (int i = 0; i < 46; ++i)
+            AppendUnavailable(s_Reasons, "field_" + std::to_string(i), std::string(k_MaxObservedReasonBytes, '"'));
+        CHECK(RawTextBytes(s_Reasons) < k_MaxLineBytes && Encoded(s_Reasons) > k_MaxLineBytes);
+        CHECK(CommandScheduler::ReduceToFit(s_Reasons) && Encoded(s_Reasons) <= k_MaxLineBytes && s_Reasons.observed.size() == 47);
+    }
+
+    // ---- the reason bound: the notes survive a 200-byte reason; the existing text gives way --------
+    {
+        Result s_Result = MaximalHeader(std::string(k_MaxReasonBytes, 'r'));
+        for (int i = 0; i < 48; ++i)
+            AppendText(s_Result, "field_" + std::to_string(i), std::string(k_MaxObservedTextBytes, 'x'));
+        CHECK(CommandScheduler::ReduceToFit(s_Result));
+        CHECK(Encoded(s_Result) <= k_MaxLineBytes);
+        CHECK(s_Result.reason.size() <= k_MaxReasonBytes);
+        CHECK(s_Result.reason.find("field reasons dropped to fit the result line bound") != std::string::npos);
+        CHECK(s_Result.reason.size() >= std::string("inspection reduced to fit the result line bound").size() && s_Result.reason.compare(s_Result.reason.size() - std::string("inspection reduced to fit the result line bound").size(), std::string::npos, "inspection reduced to fit the result line bound") == 0);
+        CHECK(s_Result.reason.rfind("rrr", 0) == 0); // what remains of the original text comes first
+        CHECK(s_Result.reason == std::string(99, 'r') + "; field reasons dropped to fit the result line bound; inspection reduced to fit the result line bound");
+        // the encoded reason is the reason itself: nothing the encoder truncates away
+        CHECK(EncodeResult(s_Result).find("\"reason\":\"" + s_Result.reason + "\"") != std::string::npos);
+
+        // a multi-byte character at the cut is not split
+        std::string s_Utf8;
+        while (s_Utf8.size() < k_MaxReasonBytes)
+            s_Utf8 += "\xC3\xA9"; // "é"
+        Result s_Multi = MaximalHeader(s_Utf8);
+        for (int i = 0; i < 48; ++i)
+            AppendText(s_Multi, "field_" + std::to_string(i), std::string(k_MaxObservedTextBytes, 'x'));
+        CHECK(CommandScheduler::ReduceToFit(s_Multi) && Encoded(s_Multi) <= k_MaxLineBytes && s_Multi.reason.size() <= k_MaxReasonBytes);
+        const size_t s_Semicolon = s_Multi.reason.find("; ");
+        CHECK(s_Semicolon != std::string::npos && s_Semicolon % 2 == 0 && s_Multi.reason.compare(0, s_Semicolon, s_Utf8, 0, s_Semicolon) == 0);
+    }
+
+    // ---- the maximal header alone (the last resort) always fits ------------------------------------
+    {
+        Result s_Header = MaximalHeader(std::string(k_MaxReasonBytes, '"'));
+        s_Header.native_at = std::string(64, '"');
+        s_Header.mission_generation = std::string(64, '"');
+        s_Header.observed.emplace_back("reasons_dropped", ObservedValue{ObservedValue::Kind::Bool, true});
+        s_Header.observed.emplace_back("observed_reduced", ObservedValue{ObservedValue::Kind::Bool, true});
+        const size_t s_Size = Encoded(s_Header);
+        CHECK(s_Size <= k_MaxLineBytes);
+        CHECK(!CommandScheduler::ReduceToFit(s_Header));
+        std::printf("line bound: the maximal escaped header with both markers encodes to %zu bytes (bound %zu)\n", s_Size, k_MaxLineBytes);
+    }
+
+    // ---- the realistic M6-B1 shapes: measured, and within the bound without any reduction ----------
+    {
+        Result s_Players = MaximalHeader();
+        const std::string s_MaxReason(k_MaxObservedReasonBytes, 'r');
+        PlayerObservation::AppendRegistry(s_Players.observed, PlayerObservation::AllRegistry(FieldStatus::Unavailable, s_MaxReason.c_str()));
+        OutfitObservation::Append(s_Players.observed, "reads_on_frame", Field<bool>::Observed(true));
+        const size_t s_PlayersInitial = Encoded(s_Players);
+        const bool s_PlayersReduced = CommandScheduler::ReduceToFit(s_Players);
+        CHECK(Encoded(s_Players) <= k_MaxLineBytes);
+        CHECK(!s_PlayersReduced || (MarkerCount(s_Players) == 1 && s_Players.observed.size() == 44));
+
+        Result s_Entity = MaximalHeader();
+        EntityReads s_Long = WithCandidateLookup(EntityWithRoundTrip(ScriptedLookup(2, 1)), ScriptedLookup(3, 2, false));
+        s_Long.hero.owning_brick = Field<std::string>::Observed(std::string(k_MaxObservedTextBytes, 'f'));
+        PlayerObservation::AppendEntity(s_Entity.observed, s_Long);
+        OutfitObservation::Append(s_Entity.observed, "reads_on_frame", Field<bool>::Observed(true));
+        const size_t s_EntitySize = Encoded(s_Entity);
+        CHECK(s_EntitySize <= k_MaxLineBytes && !CommandScheduler::ReduceToFit(s_Entity));
+        std::printf("line bound: all-unavailable registry with maximal reasons %zu bytes (%s), longest candidate-present entity read-back %zu bytes (no reduction), bound %zu\n", s_PlayersInitial, s_PlayersReduced ? "reasons dropped" : "no reduction", s_EntitySize, k_MaxLineBytes);
+    }
+
+    // ---- the scheduler re-checks the invariant on what it emits -------------------------------------
+    {
+        // a FAKE entity read set with every text at the bound and every other field unavailable with
+        // a maximal reason: the emitted result is within the bound, marked, and the re-check never
+        // fired (unbounded stays 0)
+        CommandScheduler::Stats s_Stats;
+        const Result s_Result = RunEntity(Frame(100, 5000, true), [](const EntityQuery& p_Query) {
+            const std::string s_MaxReason(k_MaxObservedReasonBytes, 'r');
+            EntityReads s_Reads = PlayerObservation::AllEntity(FieldStatus::Unavailable, s_MaxReason.c_str(), p_Query);
+            s_Reads.thread_id = GetCurrentThreadId();
+            s_Reads.bricks.count = Field<int64_t>::Observed(21);
+            for (int i = 0; i < 21; ++i)
+                s_Reads.bricks.ids.push_back(std::string(k_MaxObservedTextBytes, 'a' + static_cast<char>(i % 26)));
+            s_Reads.hero.entity_id = Field<std::string>::Observed(std::string(k_MaxObservedTextBytes, 'e'));
+            s_Reads.hero.owning_brick = Field<std::string>::Observed(std::string(k_MaxObservedTextBytes, 'o'));
+            s_Reads.hero.character_id = Field<std::string>::Observed(std::string(k_MaxObservedTextBytes, 'c'));
+            s_Reads.hero.initial_outfit_id = Field<std::string>::Observed(std::string(k_MaxObservedTextBytes, 'i'));
+            s_Reads.candidate->brick_present = Field<bool>::Observed(true);
+            s_Reads.candidate->identity.character_id = Field<std::string>::Observed(std::string(k_MaxObservedTextBytes, 'k'));
+            return s_Reads;
+        }, EntityCommand(CommandTest::Uuid(1), std::string(k_HitmenBrick), std::string(k_Agent48)), &s_Stats);
+        CHECK(s_Result.status == Status::Applied);
+        CHECK(Encoded(s_Result) <= k_MaxLineBytes && CommandScheduler::WithinLineBound(s_Result));
+        CHECK(s_Stats.unbounded == 0 && s_Stats.entities_inspected == 1);
+        CHECK(s_Stats.reduced == (MarkerCount(s_Result) > 0 ? 1u : 0u));
+        CHECK(MarkerCount(s_Result) == 0 || MarkersLast(s_Result));
+        CHECK(s_Result.command_id == CommandTest::Uuid(1) && s_Result.frame && *s_Result.frame == 100 && s_Result.mission_generation && *s_Result.mission_generation == k_Gen1 && s_Result.link_generation == 1);
+        std::printf("line bound: the scheduler's maximal FAKE entity result encodes to %zu bytes (%s; reduced %llu, unbounded %llu)\n", Encoded(s_Result), MarkerCount(s_Result) ? "reduced" : "not reduced", s_Stats.reduced, s_Stats.unbounded);
     }
 }

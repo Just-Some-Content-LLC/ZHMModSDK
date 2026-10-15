@@ -1,5 +1,7 @@
 #include "CommandScheduler.h"
 
+#include <initializer_list>
+
 #include "OutfitApply.h"
 #include "PreconditionEvaluator.h"
 #include "RelayLog.h"
@@ -207,43 +209,131 @@ namespace
     }
 }
 
-// Two stages. First the per-field reasons go (every field keeps its status and value; a
-// "reasons_dropped" marker says so), which is what an all-unavailable registry needs; only if the
-// line still does not fit are entries dropped from the end, with an "observed_reduced" marker. The
-// result's own reason is extended, never replaced.
-bool CommandScheduler::ReduceToFit(Result& p_Result)
+// M6-B1 hardening, correction B: the final wire-length invariant. Every decision is made on the
+// ACTUAL encoded line (CommandProtocol::EncodeResult: escaped strings in their encoded form, the
+// encoder's own truncations applied, the trailing newline included) and the invariant is checked
+// again after every marker entry and every reason note is added, so the result the caller emits is
+// the one that was measured. Two stages, both explicitly marked by an entry BEAM can test and by a
+// note appended to the result's own reason (the note always survives the encoder's 200-byte reason
+// truncation: the existing text, never the note, is cut to make room). Stage 1 drops the per-field
+// reasons only (every field keeps its status and value), which is what an all-unavailable registry
+// needs. Stage 2 drops plain entries from the end, one at a time, re-measuring after each, with
+// both markers kept as the last entries. The loop is bounded by the entry count. Status, command
+// identity, link identity, adapter identity, frame and mission-generation metadata are never
+// touched. A result that still does not fit with no plain entry left cannot occur for a bounded
+// header (the tests measure the maximal header); the caller re-checks the invariant regardless and
+// never emits an oversized line as a valid result.
+namespace
 {
-    if (CommandProtocol::EncodeResult(p_Result).size() <= CommandProtocol::k_MaxLineBytes)
-        return false;
+    using Observed = std::vector<std::pair<std::string, ObservedValue>>;
 
-    const auto s_Extend = [&](const char* p_Note) {
-        if (p_Result.reason.empty())
-            p_Result.reason = p_Note;
-        else
-            p_Result.reason += std::string("; ") + p_Note;
-    };
+    constexpr const char* k_ReasonsDroppedMarker = "reasons_dropped";
+    constexpr const char* k_EntriesDroppedMarker = "observed_reduced";
+    constexpr const char* k_ReasonsDroppedNote = "field reasons dropped to fit the result line bound";
+    constexpr const char* k_EntriesDroppedNote = "inspection reduced to fit the result line bound";
 
-    for (auto& s_Entry : p_Result.observed)
-        s_Entry.second.field_reason.clear();
-
-    if (p_Result.observed.size() < CommandProtocol::k_MaxObservedEntries)
-        p_Result.observed.emplace_back("reasons_dropped", Bool(true));
-
-    if (CommandProtocol::EncodeResult(p_Result).size() <= CommandProtocol::k_MaxLineBytes)
+    bool IsMarker(const std::pair<std::string, ObservedValue>& p_Entry)
     {
-        s_Extend("field reasons dropped to fit the result line bound");
+        return p_Entry.first == k_ReasonsDroppedMarker || p_Entry.first == k_EntriesDroppedMarker;
+    }
+
+    // The number of trailing marker entries (0, 1 or 2): the plain entries are the ones before them.
+    size_t TrailingMarkers(const Observed& p_Observed)
+    {
+        size_t s_Count = 0;
+        for (auto it = p_Observed.rbegin(); it != p_Observed.rend() && IsMarker(*it); ++it)
+            ++s_Count;
+        return s_Count;
+    }
+
+    // Drops the last plain entry (the one before the trailing markers). False when none is left.
+    bool DropLastPlainEntry(Observed& p_Observed)
+    {
+        const size_t s_Markers = TrailingMarkers(p_Observed);
+        if (p_Observed.size() <= s_Markers)
+            return false;
+        p_Observed.erase(p_Observed.begin() + static_cast<std::ptrdiff_t>(p_Observed.size() - s_Markers - 1));
         return true;
     }
 
-    if (!p_Result.observed.empty() && p_Result.observed.back().first == "reasons_dropped")
-        p_Result.observed.pop_back();
+    // Appends the marker entry as the last entry (once). At the entry cap the last plain entry is
+    // dropped to make room and that is returned as true, so the caller also marks the entry drop:
+    // a reduction is always visible as an entry, never only as text.
+    bool PlaceMarker(Observed& p_Observed, const char* p_Name)
+    {
+        for (const auto& s_Entry : p_Observed)
+            if (s_Entry.first == p_Name)
+                return false;
+        bool s_Dropped = false;
+        if (p_Observed.size() >= CommandProtocol::k_MaxObservedEntries)
+            s_Dropped = DropLastPlainEntry(p_Observed);
+        p_Observed.emplace_back(p_Name, Bool(true));
+        return s_Dropped;
+    }
 
-    while (!p_Result.observed.empty() && CommandProtocol::EncodeResult(p_Result).size() + 32 > CommandProtocol::k_MaxLineBytes)
-        p_Result.observed.pop_back();
+    // The result's reason with the reduction notes appended, composed from the ORIGINAL reason each
+    // time so that every note survives the encoder's bound (k_MaxReasonBytes): when the joined text
+    // would exceed it, the original text — never a note — is cut, at a UTF-8 boundary, to make room.
+    std::string WithNotes(const std::string& p_Original, std::initializer_list<const char*> p_Notes)
+    {
+        std::string s_Notes;
+        for (const char* s_Note : p_Notes)
+        {
+            if (!s_Notes.empty())
+                s_Notes += "; ";
+            s_Notes += s_Note;
+        }
+        if (p_Original.empty())
+            return s_Notes;
 
-    p_Result.observed.emplace_back("observed_reduced", Bool(true));
-    s_Extend("inspection reduced to fit the result line bound");
+        const size_t s_Room = CommandProtocol::k_MaxReasonBytes > s_Notes.size() + 2 ? CommandProtocol::k_MaxReasonBytes - s_Notes.size() - 2 : 0;
+        std::string s_Head = p_Original;
+        if (s_Head.size() > s_Room)
+        {
+            size_t s_Cut = s_Room;
+            while (s_Cut > 0 && (static_cast<unsigned char>(s_Head[s_Cut]) & 0xC0) == 0x80)
+                --s_Cut;
+            s_Head.resize(s_Cut);
+        }
+        return s_Head.empty() ? s_Notes : s_Head + "; " + s_Notes;
+    }
+
+    bool Fits(const Result& p_Result)
+    {
+        return CommandProtocol::EncodeResult(p_Result).size() <= CommandProtocol::k_MaxLineBytes;
+    }
+}
+
+bool CommandScheduler::ReduceToFit(Result& p_Result)
+{
+    if (Fits(p_Result))
+        return false;
+
+    const std::string s_Original = p_Result.reason;
+
+    // Stage 1: the per-field reasons go; every field keeps its status and value. Marked, then
+    // measured again with the marker entry and the reason note in place.
+    for (auto& s_Entry : p_Result.observed)
+        s_Entry.second.field_reason.clear();
+    p_Result.reason = WithNotes(s_Original, {k_ReasonsDroppedNote});
+    const bool s_DroppedForMarker = PlaceMarker(p_Result.observed, k_ReasonsDroppedMarker);
+    if (!s_DroppedForMarker && Fits(p_Result))
+        return true;
+
+    // Stage 2: plain entries from the end, one at a time, the final encoding measured after each
+    // drop with both markers and both notes in place. Bounded by the entry count.
+    p_Result.reason = WithNotes(s_Original, {k_ReasonsDroppedNote, k_EntriesDroppedNote});
+    PlaceMarker(p_Result.observed, k_EntriesDroppedMarker);
+    while (!Fits(p_Result) && DropLastPlainEntry(p_Result.observed))
+    {
+    }
+
     return true;
+}
+
+bool CommandScheduler::WithinLineBound(const Result& p_Result)
+{
+    return Fits(p_Result);
 }
 
 // relay.inspect.players v1 (M6-B1): no engine write; the registry's four declared slots, the three
@@ -432,7 +522,20 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
 
             if (ReduceToFit(s_Result))
                 ++m_Stats.reduced;
-            m_Queue.MarkDone(s_Command.command_id, s_Pending->link_generation, Status::Applied);
+
+            // M6-B1 hardening, correction B: the invariant re-checked on the actual encoding. A
+            // result still over the bound (unreachable for a bounded header; counted if it ever
+            // happens) is never emitted as valid: the read-back is withheld and the status says so.
+            if (!WithinLineBound(s_Result))
+            {
+                ++m_Stats.unbounded;
+                s_Result.observed.clear();
+                s_Result.status = Status::Failed;
+                s_Result.reason = "result exceeded the line bound after reduction; read-back withheld";
+                RelayLog::Warn("command scheduler: {} exceeded the result line bound after reduction; read-back withheld", s_Command.command_id);
+            }
+
+            m_Queue.MarkDone(s_Command.command_id, s_Pending->link_generation, s_Result.status);
             m_Emit(s_Result);
             return true;
         }
