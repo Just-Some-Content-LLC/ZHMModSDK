@@ -6,6 +6,151 @@ namespace CandidateObservation
 {
     using OutfitObservation::Append;
 
+    // ---- the property-read guard -------------------------------------------------------------------
+
+    namespace PropertyGuard
+    {
+        TableVerdict CheckTable(const TableFacts& p_Facts)
+        {
+            TableVerdict s_Verdict;
+
+            if (!p_Facts.present)
+            {
+                s_Verdict.kind = TableKind::Missing;
+                s_Verdict.status = FieldStatus::Unavailable;
+                s_Verdict.reason = "property table null";
+                return s_Verdict;
+            }
+
+            if (p_Facts.element_size == 0)
+            {
+                s_Verdict.kind = TableKind::Inconsistent;
+                s_Verdict.status = FieldStatus::Inconsistent;
+                s_Verdict.reason = "property table element size zero";
+                return s_Verdict;
+            }
+
+            // A null begin with a null end is the SDK's empty array; one null end alone is not.
+            if (p_Facts.begin == 0 && p_Facts.end == 0)
+            {
+                s_Verdict.kind = TableKind::Empty;
+                s_Verdict.status = FieldStatus::Unavailable;
+                s_Verdict.reason = "property table empty";
+                return s_Verdict;
+            }
+
+            if (p_Facts.begin == 0 || p_Facts.end == 0 || p_Facts.end < p_Facts.begin)
+            {
+                s_Verdict.kind = TableKind::Inconsistent;
+                s_Verdict.status = FieldStatus::Inconsistent;
+                s_Verdict.reason = "property table span inconsistent";
+                return s_Verdict;
+            }
+
+            const uintptr_t s_Bytes = p_Facts.end - p_Facts.begin;
+            if (s_Bytes % p_Facts.element_size != 0)
+            {
+                s_Verdict.kind = TableKind::Inconsistent;
+                s_Verdict.status = FieldStatus::Inconsistent;
+                s_Verdict.reason = "property table span misaligned";
+                return s_Verdict;
+            }
+
+            const size_t s_Count = static_cast<size_t>(s_Bytes / p_Facts.element_size);
+            if (s_Count == 0)
+            {
+                s_Verdict.kind = TableKind::Empty;
+                s_Verdict.status = FieldStatus::Unavailable;
+                s_Verdict.reason = "property table empty";
+                return s_Verdict;
+            }
+
+            if (s_Count > k_MaxPropertyCount)
+            {
+                s_Verdict.kind = TableKind::OverLimit;
+                s_Verdict.count = s_Count;
+                s_Verdict.status = FieldStatus::Unsupported;
+                s_Verdict.reason = fmt::format("property table over bound ({})", k_MaxPropertyCount);
+                return s_Verdict;
+            }
+
+            s_Verdict.kind = TableKind::Ok;
+            s_Verdict.count = s_Count;
+            s_Verdict.status = FieldStatus::Observed;
+            return s_Verdict;
+        }
+
+        EntryVerdict CheckEntry(const EntryFacts& p_Facts)
+        {
+            EntryVerdict s_Verdict;
+            const auto s_Refuse = [&](FieldStatus p_Status, std::string p_Reason) {
+                s_Verdict.allowed = false;
+                s_Verdict.status = p_Status;
+                s_Verdict.reason = std::move(p_Reason);
+                return s_Verdict;
+            };
+
+            if (!p_Facts.info_present || !p_Facts.type_present)
+                return s_Refuse(FieldStatus::Unavailable, "property info null");
+            if (p_Facts.has_getter)
+                return s_Refuse(FieldStatus::Unsupported, "property has an engine getter");
+            if (!p_Facts.type_info_present || !p_Facts.name_present)
+                return s_Refuse(FieldStatus::Unavailable, "property type info null");
+            if (p_Facts.name_length == 0)
+                return s_Refuse(FieldStatus::Unavailable, "property type name empty");
+            if (p_Facts.name_length >= k_MaxTypeNameBytes)
+                return s_Refuse(FieldStatus::Unsupported, "property type name unterminated");
+            if (p_Facts.name_crc != p_Facts.expected_crc || p_Facts.type_size != p_Facts.expected_size)
+                return s_Refuse(FieldStatus::Unsupported, "property type differs from the expected");
+            if (!p_Facts.type_registered)
+                return s_Refuse(FieldStatus::Unsupported, "type not registered");
+            if (!p_Facts.allocator_present)
+                return s_Refuse(FieldStatus::Unavailable, "normal allocator null");
+            if (!p_Facts.copy_present || !p_Facts.destruct_present)
+                return s_Refuse(FieldStatus::Unavailable, "property type functions null");
+
+            s_Verdict.allowed = true;
+            s_Verdict.status = FieldStatus::Observed;
+            return s_Verdict;
+        }
+
+        Decision Decide(const TableFacts& p_Table, const std::optional<EntryFacts>& p_Entry)
+        {
+            Decision s_Decision;
+            const TableVerdict s_Table = CheckTable(p_Table);
+            s_Decision.table_count = s_Table.count;
+
+            if (s_Table.kind != TableKind::Ok)
+            {
+                s_Decision.stage = Stage::RejectTable;
+                s_Decision.status = s_Table.status;
+                s_Decision.reason = s_Table.reason;
+                return s_Decision;
+            }
+
+            if (!p_Entry)
+            {
+                s_Decision.stage = Stage::NotDeclared;
+                s_Decision.status = FieldStatus::Unavailable;
+                s_Decision.reason = "property not declared on this type";
+                return s_Decision;
+            }
+
+            const EntryVerdict s_Entry = CheckEntry(*p_Entry);
+            if (!s_Entry.allowed)
+            {
+                s_Decision.stage = Stage::RejectEntry;
+                s_Decision.status = s_Entry.status;
+                s_Decision.reason = s_Entry.reason;
+                return s_Decision;
+            }
+
+            s_Decision.stage = Stage::Read;
+            s_Decision.status = FieldStatus::Observed;
+            return s_Decision;
+        }
+    }
+
     const char* MemberText(Member p_Member)
     {
         switch (p_Member)

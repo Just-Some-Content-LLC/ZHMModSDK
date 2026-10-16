@@ -101,6 +101,7 @@ add_executable(GlacierRelayTests
         Tests/PlayerInspectionTests.cpp
         Tests/InspectionBoundaryTests.cpp
         Tests/CandidateInspectionTests.cpp
+        Tests/PropertyGuardTests.cpp
         Tests/TestListener.h
         Tests/ContractLifecycleTests.cpp
         Tests/DisguiseTelemetryTests.cpp

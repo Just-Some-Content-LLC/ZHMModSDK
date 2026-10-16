@@ -744,7 +744,7 @@ namespace
     constexpr uint32_t k_PropDefaultSpawn = Hash::Crc32("m_bDefaultHeroSpawn");
     constexpr uint32_t k_PropPreferredSpawn = Hash::Crc32("m_bPreferredHeroSpawn");
     constexpr uint32_t k_PropHitmanCharacter = Hash::Crc32("m_rHitmanCharacter");
-    constexpr size_t k_MaxTypeNameBytes = 256; // the bound of the type-name scan in the engine's type table
+    constexpr size_t k_MaxTypeNameBytes = CandidateObservation::PropertyGuard::k_MaxTypeNameBytes; // the bound of the type-name scans in the engine's type table (the guard's)
 
     static_assert(sizeof(ZSpatialEntity) == 0xA0, "ZSpatialEntity is expected to be 0xA0 bytes");
     static_assert(offsetof(ZSpatialEntity, m_eidParent) == 0x70, "m_eidParent is read at 0x70");
@@ -830,47 +830,95 @@ namespace
         p_Out.parent = AuthoredIdOf(s_Spatial->m_eidParent.m_entityRef);
     }
 
-    // One property through the SDK's documented mechanism (ZEntityRef::GetProperty), reached only
-    // after every step is verified: the entity and its type table exist, the property is declared
-    // on that type, it carries no engine getter (a getter is an engine call with unknown side
-    // effects; such a property is reported unsupported, not read), its registered type is exactly
-    // T by name and size, and T is registered. GetProperty copies the value through the type's own
-    // copy function into a variant allocated by the engine's allocator; the variant is destroyed —
-    // and its memory released — before this function returns. Nothing is written to the entity.
+    // One property through the SDK's documented mechanism (ZEntityRef::GetProperty), entered only
+    // on an Allowed decision of the engine-independent guard (CandidateObservation::PropertyGuard,
+    // M6-D1a review correction B). The facts are gathered here as plain values; the decisions live
+    // in the guard, where the tests exercise them. Order: the entity and its type exist; the
+    // property table's metadata (the declared TArray's begin and end pointers as numbers, the
+    // element size) is validated and bounded by k_MaxPropertyCount BEFORE the SDK's FindProperty
+    // walks it (a missing table, an inconsistent span and an over-limit table are refused whole,
+    // never searched in part); FindProperty then walks at most the validated count; the found
+    // entry's facts (no engine getter — a getter is an engine call with unknown side effects and
+    // is not made; the type by name and size, the name terminated within the name bound; T
+    // registered; the normal allocator and the type's copy and destruct functions the read uses)
+    // decide whether GetProperty is entered, which walks the same bounded table once more, copies
+    // the value through the type's copy function into a variant allocated through the engine's
+    // pools or its normal allocator, and releases it in this scope. Nothing is written to the
+    // entity. The guard bounds the work and refuses what it can see; it does not make the engine's
+    // pointers or its allocation and copy operations safe by itself, and a fault inside them is the
+    // plugin guard's to report (as every other read).
     template <class T>
     Field<T> ReadProperty(const ZEntityRef& p_Ref, uint32_t p_PropertyId)
     {
+        using CandidateObservation::PropertyGuard::Decision;
+        using CandidateObservation::PropertyGuard::EntryFacts;
+        using CandidateObservation::PropertyGuard::Stage;
+        using CandidateObservation::PropertyGuard::TableFacts;
+        using CandidateObservation::PropertyGuard::TableKind;
+
         if (!p_Ref)
             return Field<T>::Of(FieldStatus::Unavailable, "entity reference null");
 
         const ZEntityType* s_Type = p_Ref.GetEntity()->GetType();
-        if (!s_Type || !s_Type->m_pPropertyData)
-            return Field<T>::Of(FieldStatus::Unavailable, "entity type or property table null");
+        if (!s_Type)
+            return Field<T>::Of(FieldStatus::Unavailable, "entity type null");
 
         if (!Globals::TypeRegistry || !*Globals::TypeRegistry || !Globals::MemoryManager || !*Globals::MemoryManager)
             return Field<T>::Of(FieldStatus::Unavailable, "type registry or memory manager null");
 
+        // 1. The table's metadata as numbers (nothing dereferenced): the declared TArray stores its
+        //    begin and end pointers directly for an element larger than two pointers, which
+        //    SPropertyData is (static_assert below), so begin()/end() are exactly these.
+        TableFacts s_TableFacts;
+        s_TableFacts.present = s_Type->m_pPropertyData != nullptr;
+        if (s_TableFacts.present)
+        {
+            s_TableFacts.begin = reinterpret_cast<uintptr_t>(s_Type->m_pPropertyData->m_pBegin);
+            s_TableFacts.end = reinterpret_cast<uintptr_t>(s_Type->m_pPropertyData->m_pEnd);
+        }
+        s_TableFacts.element_size = sizeof(SPropertyData);
+
+        const auto s_TableVerdict = CandidateObservation::PropertyGuard::CheckTable(s_TableFacts);
+        if (s_TableVerdict.kind != TableKind::Ok)
+            return Field<T>::Of(s_TableVerdict.status, s_TableVerdict.reason);
+
+        // 2. The bounded lookup: FindProperty walks exactly the validated span (at most
+        //    k_MaxPropertyCount entries).
         const SPropertyData* s_Property = s_Type->FindProperty(p_PropertyId);
-        if (!s_Property)
-            return Field<T>::Of(FieldStatus::Unavailable, "property not declared on this type");
+        std::optional<EntryFacts> s_EntryFacts;
+        if (s_Property)
+        {
+            EntryFacts s_Facts;
+            const SNamedPropertyInfo* s_Info = s_Property->GetPropertyInfo();
+            s_Facts.info_present = s_Info != nullptr;
+            s_Facts.type_present = s_Info && s_Info->m_propertyInfo.m_Type != nullptr;
+            if (s_Facts.type_present)
+            {
+                s_Facts.has_getter = (s_Info->m_propertyInfo.m_Flags & EPropertyInfoFlags::E_HAS_GETTER_SETTER) != 0;
+                const IType* s_TypeInfo = s_Info->m_propertyInfo.m_Type->GetTypeInfo();
+                s_Facts.type_info_present = s_TypeInfo != nullptr;
+                s_Facts.name_present = s_TypeInfo && s_TypeInfo->pszTypeName != nullptr;
+                if (s_Facts.name_present)
+                {
+                    s_Facts.name_length = strnlen(s_TypeInfo->pszTypeName, CandidateObservation::PropertyGuard::k_MaxTypeNameBytes);
+                    if (s_Facts.name_length > 0 && s_Facts.name_length < CandidateObservation::PropertyGuard::k_MaxTypeNameBytes)
+                        s_Facts.name_crc = Hash::Crc32(s_TypeInfo->pszTypeName, s_Facts.name_length);
+                    s_Facts.type_size = s_TypeInfo->m_nTypeSize;
+                    s_Facts.copy_present = s_TypeInfo->m_pTypeFunctions && s_TypeInfo->m_pTypeFunctions->placementCopyConstruct != nullptr;
+                    s_Facts.destruct_present = s_TypeInfo->m_pTypeFunctions && s_TypeInfo->m_pTypeFunctions->destruct != nullptr;
+                }
+            }
+            s_Facts.expected_crc = ZHMTypeId<T>;
+            s_Facts.expected_size = sizeof(T);
+            s_Facts.type_registered = (*Globals::TypeRegistry)->GetTypeID(ZHMTypeName<T>) != nullptr;
+            s_Facts.allocator_present = (*Globals::MemoryManager)->m_pNormalAllocator != nullptr;
+            s_EntryFacts = s_Facts;
+        }
 
-        const SNamedPropertyInfo* s_Info = s_Property->GetPropertyInfo();
-        if (!s_Info || !s_Info->m_propertyInfo.m_Type)
-            return Field<T>::Of(FieldStatus::Unavailable, "property info null");
-
-        if (s_Info->m_propertyInfo.m_Flags & EPropertyInfoFlags::E_HAS_GETTER_SETTER)
-            return Field<T>::Of(FieldStatus::Unsupported, "property has an engine getter");
-
-        const IType* s_TypeInfo = s_Info->m_propertyInfo.m_Type->GetTypeInfo();
-        if (!s_TypeInfo || !s_TypeInfo->pszTypeName)
-            return Field<T>::Of(FieldStatus::Unavailable, "property type info null");
-
-        const size_t s_NameLength = strnlen(s_TypeInfo->pszTypeName, k_MaxTypeNameBytes);
-        if (Hash::Crc32(s_TypeInfo->pszTypeName, s_NameLength) != ZHMTypeId<T> || s_TypeInfo->m_nTypeSize != sizeof(T))
-            return Field<T>::Of(FieldStatus::Unsupported, "property type " + std::string(s_TypeInfo->pszTypeName, s_NameLength));
-
-        if (!(*Globals::TypeRegistry)->GetTypeID(ZHMTypeName<T>))
-            return Field<T>::Of(FieldStatus::Unsupported, "type not registered");
+        // 3. The decision; the SDK read only on Read.
+        const Decision s_Decision = CandidateObservation::PropertyGuard::Decide(s_TableFacts, s_EntryFacts);
+        if (s_Decision.stage != Stage::Read)
+            return Field<T>::Of(s_Decision.status, s_Decision.reason);
 
         {
             const ZVariant<T> s_Variant = p_Ref.GetProperty<T>(p_PropertyId);
@@ -880,6 +928,8 @@ namespace
             return Field<T>::Observed(*s_Value);
         } // the variant releases the engine allocation here
     }
+
+    static_assert(sizeof(SPropertyData) > 2 * sizeof(void*), "SPropertyData is not an inline TArray element: the table's begin and end pointers are the span");
 
     // The class of an entity as its own interface table names it: "ZHeroSpawn" when that interface
     // is listed, otherwise the first named interface (bounded). A read of the type table only.

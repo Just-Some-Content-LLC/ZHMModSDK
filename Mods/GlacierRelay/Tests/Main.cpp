@@ -22,6 +22,7 @@ void RunOutfitApplyTests();
 void RunPlayerInspectionTests();
 void RunInspectionBoundaryTests();
 void RunCandidateInspectionTests();
+void RunPropertyGuardTests();
 
 int main()
 {
@@ -47,6 +48,7 @@ int main()
     RunPlayerInspectionTests();
     RunInspectionBoundaryTests();
     RunCandidateInspectionTests();
+    RunPropertyGuardTests();
 
     if (g_Failures == 0)
         std::printf("GlacierRelayTests: all checks passed\n");

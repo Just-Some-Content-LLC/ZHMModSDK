@@ -234,6 +234,104 @@ namespace CandidateObservation
         std::optional<std::string> entity_id; // 16 lowercase hex; absent = the historical Agent48 id
     };
 
+    // ---- the property-read guard (M6-D1a review, correction B) -----------------------------------
+    //
+    // The SDK's property walkers (ZEntityType::FindProperty, ZEntityRef::GetProperty) iterate an
+    // entity type's whole property table; a fixed list of requested names does not bound that.
+    // Before the Relay's property-inspection path enters either walker it validates the table's
+    // metadata as plain values and enforces a named maximum: a defensive plausibility / work limit,
+    // not an asserted engine limit. A missing table, an inconsistent span and an over-limit table
+    // are each refused with their own status and a bounded reason; nothing is searched in part and
+    // then reported absent. After a bounded lookup found the entry, the entry's own facts (an
+    // engine getter, the type by name and size, a type name terminated within the name bound, the
+    // type's registration, the allocator and type functions the read would use) decide whether the
+    // SDK read is entered at all. Both decisions are pure functions of plain facts, so the tests
+    // exercise exactly the rule the DLL applies without an engine pointer; the Glacier-facing reader
+    // gathers the facts and calls the SDK only on an Allowed decision.
+    //
+    // The guard does not make an arbitrary engine pointer safe and does not make the SDK's
+    // allocation and copy operations atomic; it bounds the work and refuses what it can see.
+    namespace PropertyGuard
+    {
+        constexpr size_t k_MaxPropertyCount = 4096;  // the property-table work limit (a plausibility bound; typical tables hold tens of entries)
+        constexpr size_t k_MaxTypeNameBytes = 256;   // a type name must terminate within this many bytes to be compared at all
+
+        struct TableFacts
+        {
+            bool present = false;      // the type's property-table pointer is non-null
+            uintptr_t begin = 0;       // the table's begin pointer as a number (never dereferenced here)
+            uintptr_t end = 0;         // the table's end pointer as a number
+            size_t element_size = 0;   // sizeof the declared element
+        };
+
+        enum class TableKind
+        {
+            Ok,           // a consistent, non-empty span within the limit: the walkers may run over exactly these entries
+            Empty,        // a consistent empty span: the property is not declared; no walk
+            Missing,      // no table pointer
+            Inconsistent, // a span that is not a whole number of elements, runs backwards, or has one null end
+            OverLimit,    // more entries than the work limit: refused whole, never searched in part
+        };
+
+        struct TableVerdict
+        {
+            TableKind kind = TableKind::Missing;
+            size_t count = 0;                         // the entry count when Ok (or Empty: 0)
+            FieldStatus status = FieldStatus::Unavailable; // the field status of a refusal
+            std::string reason;                       // bounded reason text of a refusal (empty when Ok)
+        };
+
+        TableVerdict CheckTable(const TableFacts& p_Facts);
+
+        struct EntryFacts
+        {
+            bool info_present = false;        // the named property info resolves
+            bool type_present = false;        // the property's STypeID is non-null
+            bool has_getter = false;          // E_HAS_GETTER_SETTER
+            bool type_info_present = false;   // the type's IType resolves
+            bool name_present = false;        // pszTypeName non-null
+            size_t name_length = 0;           // the bounded length scan's result (== k_MaxTypeNameBytes: unterminated)
+            uint32_t name_crc = 0;            // CRC32 of the terminated name
+            uint32_t expected_crc = 0;        // the SDK's compile-time id of T
+            size_t type_size = 0;             // the type table's size of the property's type
+            size_t expected_size = 0;         // sizeof(T)
+            bool type_registered = false;     // the registry resolves T's own name
+            bool allocator_present = false;   // the memory manager's normal allocator the read allocates through
+            bool copy_present = false;        // the type's placementCopyConstruct the read copies through
+            bool destruct_present = false;    // the type's destruct the variant releases through
+        };
+
+        struct EntryVerdict
+        {
+            bool allowed = false;             // true: the SDK read may be entered for this entry
+            FieldStatus status = FieldStatus::Unavailable;
+            std::string reason;
+        };
+
+        EntryVerdict CheckEntry(const EntryFacts& p_Facts);
+
+        // The whole decision for one property read, for the tests: the table verdict, then, when
+        // the table was Ok, the lookup (nullopt = not declared) and the entry verdict. `Read` is
+        // the only outcome on which the SDK read is entered; every other outcome names its stage.
+        enum class Stage
+        {
+            RejectTable,  // the table verdict was not Ok: FindProperty is not entered
+            NotDeclared,  // the bounded lookup found no entry: GetProperty is not entered
+            RejectEntry,  // the entry verdict refused: GetProperty is not entered
+            Read,         // GetProperty is entered
+        };
+
+        struct Decision
+        {
+            Stage stage = Stage::RejectTable;
+            FieldStatus status = FieldStatus::Unavailable;
+            std::string reason;
+            size_t table_count = 0;
+        };
+
+        Decision Decide(const TableFacts& p_Table, const std::optional<EntryFacts>& p_Entry);
+    }
+
     // ---- pure helpers ----------------------------------------------------------------------------
 
     const char* MemberText(Member p_Member);     // "0" | "1" | "2"
