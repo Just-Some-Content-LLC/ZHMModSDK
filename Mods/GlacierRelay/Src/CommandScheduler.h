@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 
+#include "CandidateObservation.h"
 #include "CommandProtocol.h"
 #include "CommandQueue.h"
 #include "IOutfitApplier.h"
@@ -43,6 +44,11 @@ public:
     using PlayersInspector = std::function<PlayerObservation::RegistryReads()>;
     using EntityInspector = std::function<PlayerObservation::EntityReads(const PlayerObservation::EntityQuery& p_Query)>;
 
+    // M6-D1a: the read-only candidate-hero inspection (relay.inspect.candidate). Same rule: guarded
+    // engine reads on this frame only, nothing cached, null in tests and in the probe's default
+    // mode (reported as unsupported).
+    using CandidateInspector = std::function<CandidateObservation::CandidateReads(const CandidateObservation::CandidateQuery& p_Query)>;
+
     struct FrameObservation
     {
         uint64_t frame = 0;                 // the adapter's own frame counter
@@ -77,6 +83,9 @@ public:
         // M6-B1 (null: the registry and entity reads are unsupported on this frame source).
         PlayersInspector players_inspector;
         EntityInspector entity_inspector;
+
+        // M6-D1a (null: the candidate reads are unsupported on this frame source).
+        CandidateInspector candidate_inspector;
     };
 
     struct Stats
@@ -98,6 +107,8 @@ public:
         uint64_t players_inspected = 0;  // relay.inspect.players applied
         uint64_t entities_inspected = 0; // relay.inspect.entity applied
         uint64_t unbounded = 0;          // M6-B1 hardening B: a result still over the line bound after reduction (never emitted as valid; expected 0)
+        // M6-D1a
+        uint64_t candidates_inspected = 0; // relay.inspect.candidate applied
         uint32_t first_thread_id = 0;
         uint32_t last_thread_id = 0;
         bool thread_changed = false; // the scheduler was invoked from more than one thread
@@ -142,6 +153,8 @@ private:
     // M6-B1
     void InspectPlayers(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
     void InspectEntity(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
+    // M6-D1a
+    void InspectCandidate(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
 
 private:
     CommandQueue& m_Queue;

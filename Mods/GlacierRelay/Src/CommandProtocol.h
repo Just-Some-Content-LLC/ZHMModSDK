@@ -79,9 +79,13 @@ namespace CommandProtocol
     // relay.inspect.entity v1 (M6-B1; read-only: the player registry's four declared slots, the
     // loaded-brick inventory, the local hero's authored identity and the blueprint-factory lookup
     // round trip, with two optional 16-hex-digit parameters for the candidate brick and entity id)
-    // are executable and inert; player.outfit.set v1 is reserved (documented, decoded, never
-    // executed); player.outfit.set v2 (M5 C-2B) is the effectful entry, decodable only on a
-    // version-2 link with the effectful setting on; any other name/version is unknown.
+    // are executable and inert; relay.inspect.candidate v1 (M6-D1a; read-only: the candidate
+    // hero's and the local hero's stored spatial fields, member presence and m_bActive property,
+    // the spawn entity's stored transform and properties, registry membership by identity, with
+    // the same two optional 16-hex-digit parameters as relay.inspect.entity) is executable and
+    // inert; player.outfit.set v1 is reserved (documented, decoded, never executed);
+    // player.outfit.set v2 (M5 C-2B) is the effectful entry, decodable only on a version-2 link
+    // with the effectful setting on; any other name/version is unknown.
     enum class Entry
     {
         Unknown,
@@ -91,6 +95,7 @@ namespace CommandProtocol
         PlayerOutfitSet2,
         RelayInspectPlayers1,
         RelayInspectEntity1,
+        RelayInspectCandidate1,
     };
 
     Entry Lookup(std::string_view p_Name, uint32_t p_Version);

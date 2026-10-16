@@ -77,6 +77,10 @@ private:
     PlayerObservation::RegistryReads InspectPlayers();
     PlayerObservation::EntityReads InspectEntity(const PlayerObservation::EntityQuery& p_Query);
 
+    // M6-D1a: the scheduler's read-only candidate inspector (relay.inspect.candidate), guarded the
+    // same way.
+    CandidateObservation::CandidateReads InspectCandidate(const CandidateObservation::CandidateQuery& p_Query);
+
     DECLARE_PLUGIN_DETOUR(
         GlacierRelay, void, OnTelemetryEventSent, ZAchievementManagerSimple* th, uint32_t eventIndex,
         const ZDynamicObject& event

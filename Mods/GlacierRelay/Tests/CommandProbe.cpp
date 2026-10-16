@@ -55,6 +55,10 @@
 // present: the result at the 48-entry cap), "texts-escaped" (texts with quotes, backslashes, a
 // tab, a control character and a two-byte UTF-8 character), "reasons-maximal" (every registry and
 // entity field unavailable with a 40-byte reason). Pathological by design; never HITMAN state.
+// candidate-mode (M6-D1a): the FAKE candidate, spawn and registry-identity state the read-only
+// candidate inspection reports (relay.inspect.candidate); the modes are documented in
+// FakeCandidate.h ("default" = the candidate brick absent). Every value is scripted and is never an
+// observation of HITMAN.
 // Exit code 0 when the link connected and was welcomed at least once.
 
 #include <Windows.h>
@@ -70,6 +74,7 @@
 #include "CommandLink.h"
 #include "CommandQueue.h"
 #include "CommandScheduler.h"
+#include "FakeCandidate.h"
 #include "FakeOutfitApplier.h"
 #include "PlayerObservation.h"
 #include "RelayAdapter.h"
@@ -622,7 +627,7 @@ int main(int p_Argc, char** p_Argv)
 {
     if (p_Argc < 4)
     {
-        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short] [default|registry-unavailable|layout-unsupported|extra-slot|hero-missing|candidate-present|roundtrip-different|roundtrip-unrepresentable|factory-mismatch|subentity-missing|bricks-empty|bricks-oversized|dirty-transform|invalid-flags|index-at-count|index-beyond-count|count-negative|count-zero|bricks-at-bound|bricks-oversized-candidate|texts-maximal|texts-maximal-candidate|texts-escaped|reasons-maximal]\n");
+        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short] [default|registry-unavailable|layout-unsupported|extra-slot|hero-missing|candidate-present|roundtrip-different|roundtrip-unrepresentable|factory-mismatch|subentity-missing|bricks-empty|bricks-oversized|dirty-transform|invalid-flags|index-at-count|index-beyond-count|count-negative|count-zero|bricks-at-bound|bricks-oversized-candidate|texts-maximal|texts-maximal-candidate|texts-escaped|reasons-maximal] [candidate-mode: default|candidate-present|candidate-incomplete|candidate-in-slot|candidate-in-slot-nohero|spawn-other|spawn-missing|entity-missing|hero-interface-missing|parent-none|parent-unavailable|dirty-transform|hidden|active-unavailable|active-getter|registry-unavailable|count-invalid|index-at-count|bricks-oversized|texts-maximal|reasons-maximal|scene-unavailable]\n");
         return 2;
     }
 
@@ -633,6 +638,7 @@ int main(int p_Argc, char** p_Argv)
     const bool s_Effectful = p_Argc > 5 && std::string(p_Argv[5]) == "effectful";
     const std::string s_ApplyMode = p_Argc > 6 ? p_Argv[6] : "ok";
     const std::string s_PlayersMode = p_Argc > 7 ? p_Argv[7] : "default"; // M6-B1
+    const std::string s_CandidateMode = p_Argc > 8 ? p_Argv[8] : "default"; // M6-D1a
 
     // The test token comes from the environment only (never a file, never an argument that a
     // transcript would show); it is never printed.
@@ -647,6 +653,8 @@ int main(int p_Argc, char** p_Argv)
     const std::string s_Adapter = RelayAdapter::NewInstanceId();
     RelayLog::Info("command probe: adapter instance {}, port {}, frame interval {} ms, duration {} ms, scene {}, {} , apply-mode {}, players-mode {}, token {}, main thread {} (FAKE frame source, FAKE inspection data, FAKE registry/entity data and FAKE applier; never HITMAN state)", s_Adapter, s_Port, s_Interval, s_Duration, s_SceneMode, s_Effectful ? "effectful" : "inert", s_ApplyMode, s_PlayersMode, s_Token.empty() ? "absent (protocol version 1)" : "present (protocol version 2; not logged)", GetCurrentThreadId());
     std::printf("command probe: players-mode %s (FAKE registry, brick, entity and transform data; never HITMAN state)\n", s_PlayersMode.c_str());
+    std::printf("command probe: candidate-mode %s (FAKE candidate, spawn and registry-identity data for relay.inspect.candidate; never HITMAN state)\n", s_CandidateMode.c_str());
+    RelayLog::Info("command probe: candidate-mode {} (FAKE candidate, spawn and registry-identity data; never HITMAN state)", s_CandidateMode);
     std::printf("command probe: adapter instance %s, port %u, frame interval %u ms, duration %u ms, scene %s, %s, apply-mode %s, token %s, main thread %lu (fake frame source, fake inspection data and fake applier)\n", s_Adapter.c_str(), s_Port, s_Interval, s_Duration, s_SceneMode.c_str(), s_Effectful ? "effectful" : "inert", s_ApplyMode.c_str(), s_Token.empty() ? "absent (v1)" : "present (v2; not printed)", GetCurrentThreadId());
 
     // The stable rule scaled to the fake frame rate (the real rule is 1,000 ms and 60 frames):
@@ -805,6 +813,8 @@ int main(int p_Argc, char** p_Argv)
             // M6-B1: the FAKE registry and entity readers (scripted per players-mode; never HITMAN state)
             s_Observation.players_inspector = [&] { return FakePlayers(s_World, s_Applier.inner.world, s_PlayersMode); };
             s_Observation.entity_inspector = [&](const PlayerObservation::EntityQuery& p_Query) { return FakeEntity(s_World, s_PlayersMode, p_Query); };
+            // M6-D1a: the FAKE candidate reader (scripted per candidate-mode; never HITMAN state)
+            s_Observation.candidate_inspector = [&](const CandidateObservation::CandidateQuery& p_Query) { return FakeCandidate::Reads(s_CandidateMode, s_World.playing, s_World.registry_generation, p_Query); };
             s_Observation.link_generation_now = [&] { return s_Link.LinkGeneration(); };
 
             s_Link.SetMissionGeneration(s_Observation.mission_generation);
@@ -828,11 +838,11 @@ int main(int p_Argc, char** p_Argv)
         s_Stats.protocol_version, s_Stats.effectful ? 1 : 0, s_Stats.connects, s_Stats.disconnects, s_Stats.refusals, s_Stats.attests_sent, s_Stats.link_generation, s_Stats.lines_received, s_Stats.commands_queued, s_Stats.commands_busy, s_Stats.commands_duplicate, s_Stats.commands_rejected, s_Stats.protocol_violations, s_Stats.results_sent, s_Stats.cleared_on_disconnect, s_Stats.reconnect_waits, s_Stats.current_backoff_ms, s_Stats.stable_links, s_Stats.network_thread_id
     );
     std::printf(
-        "command probe: queue pushed %llu popped %llu busy %llu duplicates %llu cleared %llu remembered %zu; scheduler frames %llu executed %llu inspected %llu players_inspected %llu entities_inspected %llu outfit dispatched %llu called %llu changed %llu not_applied %llu uncertain %llu reduced %llu expired %llu stale %llu rejected %llu first thread %lu last thread %lu changed %d last latency %llu ms max %llu ms; FAKE applier observes %d invokes %d readbacks %d latched %d\n",
-        s_Queued.pushed, s_Queued.popped, s_Queued.busy, s_Queued.duplicates, s_Queued.cleared, s_Queued.remembered, s_Scheduled.frames, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.players_inspected, s_Scheduled.entities_inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.outfit_not_applied, s_Scheduled.outfit_uncertain, s_Scheduled.reduced, s_Scheduled.expired, s_Scheduled.stale_generation, s_Scheduled.rejected, s_Scheduled.first_thread_id, s_Scheduled.last_thread_id, s_Scheduled.thread_changed ? 1 : 0, s_Scheduled.last_latency_ms, s_Scheduled.max_latency_ms,
+        "command probe: queue pushed %llu popped %llu busy %llu duplicates %llu cleared %llu remembered %zu; scheduler frames %llu executed %llu inspected %llu players_inspected %llu entities_inspected %llu candidates_inspected %llu outfit dispatched %llu called %llu changed %llu not_applied %llu uncertain %llu reduced %llu unbounded %llu expired %llu stale %llu rejected %llu first thread %lu last thread %lu changed %d last latency %llu ms max %llu ms; FAKE applier observes %d invokes %d readbacks %d latched %d\n",
+        s_Queued.pushed, s_Queued.popped, s_Queued.busy, s_Queued.duplicates, s_Queued.cleared, s_Queued.remembered, s_Scheduled.frames, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.players_inspected, s_Scheduled.entities_inspected, s_Scheduled.candidates_inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.outfit_not_applied, s_Scheduled.outfit_uncertain, s_Scheduled.reduced, s_Scheduled.unbounded, s_Scheduled.expired, s_Scheduled.stale_generation, s_Scheduled.rejected, s_Scheduled.first_thread_id, s_Scheduled.last_thread_id, s_Scheduled.thread_changed ? 1 : 0, s_Scheduled.last_latency_ms, s_Scheduled.max_latency_ms,
         s_Applier.inner.observes, s_Applier.inner.invokes, s_Applier.inner.readbacks, s_Applier.inner.Latched() ? 1 : 0
     );
-    RelayLog::Info("command probe: done after {} fake frames; connects {}, executed {}, inspected {}, players inspected {}, entities inspected {}, outfit dispatched {} called {} changed {}, expired {}, violations {}", s_Frames, s_Stats.connects, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.players_inspected, s_Scheduled.entities_inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.expired, s_Stats.protocol_violations);
+    RelayLog::Info("command probe: done after {} fake frames; connects {}, executed {}, inspected {}, players inspected {}, entities inspected {}, candidates inspected {}, outfit dispatched {} called {} changed {}, expired {}, violations {}", s_Frames, s_Stats.connects, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.players_inspected, s_Scheduled.entities_inspected, s_Scheduled.candidates_inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.expired, s_Stats.protocol_violations);
 
     return s_Stats.connects > 0 ? 0 : 1;
 }

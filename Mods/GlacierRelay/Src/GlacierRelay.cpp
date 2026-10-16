@@ -144,9 +144,9 @@ void GlacierRelay::OnEngineInitialized()
         });
 
         if (s_Command.effectful)
-            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1, relay.inspect.entity/1 (read-only) and player.outfit.set/2 (EFFECTFUL: one guarded ZHitman5_SetOutfit call behind the applying-frame gate), one command per frame; protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
+            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1, relay.inspect.entity/1, relay.inspect.candidate/1 (read-only) and player.outfit.set/2 (EFFECTFUL: one guarded ZHitman5_SetOutfit call behind the applying-frame gate), one command per frame; protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
         else
-            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1 and relay.inspect.entity/1 (read-only), one command per frame, no engine write ([command] effectful = false); protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
+            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1, relay.inspect.entity/1 and relay.inspect.candidate/1 (read-only), one command per frame, no engine write ([command] effectful = false); protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
     }
     else
     {
@@ -329,6 +329,10 @@ void GlacierRelay::ScheduleCommand(const SceneState& p_Scene, bool p_PlayingBefo
     s_Observation.players_inspector = [this] { return InspectPlayers(); };
     s_Observation.entity_inspector = [this](const PlayerObservation::EntityQuery& p_Query) { return InspectEntity(p_Query); };
 
+    // M6-D1a: the read-only candidate inspector, called by the scheduler on this frame only for a
+    // relay.inspect.candidate command taken this frame (never on an idle frame).
+    s_Observation.candidate_inspector = [this](const CandidateObservation::CandidateQuery& p_Query) { return InspectCandidate(p_Query); };
+
     // M5 C-2B: the applier only when the effectful setting constructed it; the link generation
     // re-read immediately before any setter call.
     s_Observation.applier = m_OutfitApplier.get();
@@ -473,6 +477,27 @@ PlayerObservation::EntityReads GlacierRelay::InspectEntity(const PlayerObservati
     if (!s_Completed)
     {
         auto s_Faulted = PlayerObservation::AllEntity(CommandProtocol::FieldStatus::Unavailable, "fault during the entity reads", p_Query);
+        s_Faulted.thread_id = GetCurrentThreadId();
+        return s_Faulted;
+    }
+
+    return s_Reads;
+}
+
+// M6-D1a: the candidate inspection under its own fault guard, as above.
+CandidateObservation::CandidateReads GlacierRelay::InspectCandidate(const CandidateObservation::CandidateQuery& p_Query)
+{
+    CandidateObservation::CandidateReads s_Reads;
+    bool s_Completed = false;
+
+    RelayLog::Guard("InspectCandidate", [&] {
+        s_Reads = SceneObservation::ObserveCandidate(p_Query);
+        s_Completed = true;
+    });
+
+    if (!s_Completed)
+    {
+        auto s_Faulted = CandidateObservation::AllCandidate(CommandProtocol::FieldStatus::Unavailable, "candidate reads faulted", p_Query);
         s_Faulted.thread_id = GetCurrentThreadId();
         return s_Faulted;
     }

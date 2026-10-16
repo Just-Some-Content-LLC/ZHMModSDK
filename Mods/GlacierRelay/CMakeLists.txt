@@ -11,6 +11,8 @@ cmake_minimum_required(VERSION 3.12)
 set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/Attestation.cpp
         Src/Attestation.h
+        Src/CandidateObservation.cpp
+        Src/CandidateObservation.h
         Src/CommandJson.cpp
         Src/CommandJson.h
         Src/CommandLink.cpp
@@ -98,6 +100,7 @@ add_executable(GlacierRelayTests
         Tests/OutfitInspectionTests.cpp
         Tests/PlayerInspectionTests.cpp
         Tests/InspectionBoundaryTests.cpp
+        Tests/CandidateInspectionTests.cpp
         Tests/TestListener.h
         Tests/ContractLifecycleTests.cpp
         Tests/DisguiseTelemetryTests.cpp

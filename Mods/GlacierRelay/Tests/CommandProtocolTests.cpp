@@ -67,6 +67,9 @@ void RunCommandProtocolTests()
         CHECK(Lookup("relay.inspect.players", 1) == Entry::RelayInspectPlayers1 && !IsEffectful(Entry::RelayInspectPlayers1));
         CHECK(Lookup("relay.inspect.entity", 1) == Entry::RelayInspectEntity1 && !IsEffectful(Entry::RelayInspectEntity1));
         CHECK(Lookup("relay.inspect.players", 2) == Entry::Unknown && Lookup("relay.inspect.entity", 2) == Entry::Unknown);
+        // M6-D1a
+        CHECK(Lookup("relay.inspect.candidate", 1) == Entry::RelayInspectCandidate1 && !IsEffectful(Entry::RelayInspectCandidate1));
+        CHECK(Lookup("relay.inspect.candidate", 2) == Entry::Unknown && Lookup("relay.inspect.candidates", 1) == Entry::Unknown);
         CHECK(ValidHex16("007c57a6ea581f8c") && ValidHex16("feede715906f747f"));
         CHECK(!ValidHex16("FEEDE715906F747F") && !ValidHex16("feede715906f747") && !ValidHex16("feede715906f747fa") && !ValidHex16("0xfeede715906f74") && !ValidHex16(""));
     }
@@ -100,6 +103,27 @@ void RunCommandProtocolTests()
         std::string s_V2Line = CommandTest::Command(s_Id, 3, 500, "relay.inspect.players", 1, "{}", "{}", 2);
         s_V2Line.pop_back();
         CHECK(DecodeCommand(s_V2Line, s_V2).ok);
+
+        // M6-D1a: relay.inspect.candidate takes exactly the same two optional ids and nothing else —
+        // no spawn id, no address, no offset, no name of anything.
+        const auto s_Candidate = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.candidate", 1));
+        CHECK(s_Candidate.ok && s_Candidate.command.entry == Entry::RelayInspectCandidate1 && s_Candidate.command.params.empty());
+        const auto s_CandidateBoth = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.candidate", 1, "{\"brick\":\"007c57a6ea581f8c\",\"entity_id\":\"feede715906f747f\"}"));
+        CHECK(s_CandidateBoth.ok && s_CandidateBoth.command.params.size() == 2 && s_CandidateBoth.command.params[1].first == "entity_id");
+        const auto s_CandidateSpawn = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.candidate", 1, "{\"spawn_id\":\"feed755acdd56780\"}"));
+        CHECK(!s_CandidateSpawn.ok && Contains(s_CandidateSpawn.reason, "unknown parameter: spawn_id"));
+        const auto s_CandidateOffset = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.candidate", 1, "{\"offset\":1816}"));
+        CHECK(!s_CandidateOffset.ok && Contains(s_CandidateOffset.reason, "unknown parameter: offset"));
+        const auto s_CandidateMethod = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.candidate", 1, "{\"entity_id\":\"GetObjectToWorld\"}"));
+        CHECK(!s_CandidateMethod.ok && Contains(s_CandidateMethod.reason, "invalid parameter: entity_id"));
+        const auto s_CandidateUpper = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.candidate", 1, "{\"brick\":\"007C57A6EA581F8C\"}"));
+        CHECK(!s_CandidateUpper.ok && Contains(s_CandidateUpper.reason, "invalid parameter: brick"));
+        std::string s_CandidateV2 = CommandTest::Command(s_Id, 3, 500, "relay.inspect.candidate", 1, "{}", "{}", 2);
+        s_CandidateV2.pop_back();
+        CHECK(DecodeCommand(s_CandidateV2, s_V2).ok && DecodeCommand(s_CandidateV2, s_V2).command.entry == Entry::RelayInspectCandidate1);
+        // version 2 of the entry does not exist
+        const auto s_CandidateV2Entry = s_Decode(CommandTest::Command(s_Id, 3, 500, "relay.inspect.candidate", 2));
+        CHECK(!s_CandidateV2Entry.ok && Contains(s_CandidateV2Entry.reason, "unknown command"));
     }
 
     // --- a valid relay.probe command ----------------------------------------------------------------

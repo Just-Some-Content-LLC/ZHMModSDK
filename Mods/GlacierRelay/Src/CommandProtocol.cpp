@@ -54,6 +54,8 @@ namespace CommandProtocol
             return Entry::RelayInspectPlayers1;
         if (p_Name == "relay.inspect.entity" && p_Version == 1)
             return Entry::RelayInspectEntity1;
+        if (p_Name == "relay.inspect.candidate" && p_Version == 1)
+            return Entry::RelayInspectCandidate1;
         return Entry::Unknown;
     }
 
@@ -322,10 +324,13 @@ namespace CommandProtocol
                 break;
 
             case Entry::RelayInspectEntity1:
+            case Entry::RelayInspectCandidate1:
             {
                 // M6-B1: two optional, strictly validated 16-hex-digit ids (a brick's runtime resource
                 // id and an authored entity id); nothing else. No offset, no address, no pointer: the
                 // ids name content, and the reader resolves them through the SDK's declared lookups.
+                // M6-D1a: relay.inspect.candidate accepts exactly the same two parameters and nothing
+                // else; the spawn target is the compiled historical default, never a peer-supplied id.
                 for (const auto& s_Field : s_Params->fields)
                 {
                     if (s_Field.first != "brick" && s_Field.first != "entity_id")

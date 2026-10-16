@@ -5,6 +5,7 @@
 
 #include "Glacier/ZEntity.h"
 
+#include "CandidateObservation.h"
 #include "OutfitObservation.h"
 #include "PlayerObservation.h"
 #include "SceneState.h"
@@ -62,4 +63,22 @@ namespace SceneObservation
     // (GetSubEntitiesCount / GetSubEntityIndex / GetSubEntity), each reached only after a null and
     // a type check. No write, no cache, no pointer leaves this function.
     PlayerObservation::EntityReads ObserveEntity(const PlayerObservation::EntityQuery& p_Query);
+
+    // M6-D1a (relay.inspect.candidate): on this frame, the local hero (registry slot 0) and the
+    // candidate (the named or historical brick / authored entity, through the same bounded
+    // blueprint-factory lookup as M6-B1): their STORED spatial fields (the cached object-to-world
+    // translation and its dirty flag, the parent-relative translation and rotation, the parent
+    // entity's authored id, the presence of the transform-tree links, the visibility bits — read
+    // as declared SDK members, never through GetObjectToWorldMatrix, never through a transform
+    // pointer), the PRESENCE of the hero's simulation members (non-null pointers and references;
+    // interface resolution for references), the current outfit tuple, and the m_bActive property
+    // through ZEntityRef::GetProperty (reached only after the entity type, the property's
+    // declaration, its type and the absence of an engine getter are verified; the variant is
+    // destroyed in the same scope); the spawn entity (the historical Agent48Spawn id, looked up in
+    // the same factory with the same bounds) with its class name from its own interface table, its
+    // stored transform and dirty flag, and its four authored properties through the same property
+    // mechanism; and the four registry slots' m_HitmanEntity compared by entity identity with the
+    // local hero and the candidate on this frame. No write, no setter, no cache-refreshing getter,
+    // no raw pointer dereference, no cache, no pointer leaves this function.
+    CandidateObservation::CandidateReads ObserveCandidate(const CandidateObservation::CandidateQuery& p_Query);
 }

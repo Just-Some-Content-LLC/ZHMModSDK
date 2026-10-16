@@ -392,6 +392,40 @@ void CommandScheduler::InspectEntity(const CommandQueue::Pending& p_Pending, con
         p_Result.reason = "engine reads unsupported on this frame source; frame values only";
 }
 
+// relay.inspect.candidate v1 (M6-D1a): no engine write; the candidate hero's and the local hero's
+// stored spatial fields, member presence and m_bActive property, the spawn entity's stored
+// transform and properties, and registry membership by identity, all on this frame, each field
+// with its status (the packed groups' grammar is documented in CandidateObservation.h).
+void CommandScheduler::InspectCandidate(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, Result& p_Result)
+{
+    using OutfitObservation::Append;
+    using OutfitObservation::Field;
+
+    const uint64_t s_Age = p_Frame.now_mono_ms >= p_Pending.received_mono_ms ? p_Frame.now_mono_ms - p_Pending.received_mono_ms : 0;
+    const bool s_HaveInspector = static_cast<bool>(p_Frame.candidate_inspector);
+
+    CandidateObservation::CandidateQuery s_Query;
+    for (const auto& s_Param : p_Pending.command.params)
+    {
+        if (s_Param.first == "brick")
+            s_Query.brick = s_Param.second;
+        else if (s_Param.first == "entity_id")
+            s_Query.entity_id = s_Param.second;
+    }
+
+    CandidateObservation::CandidateReads s_Reads = s_HaveInspector
+        ? p_Frame.candidate_inspector(s_Query)
+        : CandidateObservation::AllCandidate(FieldStatus::Unsupported, "no inspector on this frame source", s_Query);
+
+    AppendFrameValues(p_Result, p_Frame, s_Age);
+    CandidateObservation::AppendCandidate(p_Result.observed, s_Reads);
+    Append(p_Result.observed, "reads_on_frame", s_HaveInspector ? Field<bool>::Observed(s_Reads.thread_id == p_Frame.thread_id) : Field<bool>::Of(FieldStatus::Unsupported, "no inspector"));
+
+    p_Result.status = Status::Applied;
+    if (!s_HaveInspector)
+        p_Result.reason = "engine reads unsupported on this frame source; frame values only";
+}
+
 bool CommandScheduler::Tick(const FrameObservation& p_Frame)
 {
     ++m_Stats.frames;
@@ -503,11 +537,16 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
 
         case CommandProtocol::Entry::RelayInspectPlayers1:
         case CommandProtocol::Entry::RelayInspectEntity1:
+        case CommandProtocol::Entry::RelayInspectCandidate1:
         {
-            // M6-B1: no engine write. The reads happen here, on this frame, through the inspector.
+            // M6-B1 / M6-D1a: no engine write. The reads happen here, on this frame, through the
+            // inspector of the entry; the same reduction and line-bound invariant for all three.
             const bool s_Players = s_Command.entry == CommandProtocol::Entry::RelayInspectPlayers1;
+            const bool s_Candidate = s_Command.entry == CommandProtocol::Entry::RelayInspectCandidate1;
             if (s_Players)
                 ++m_Stats.players_inspected;
+            else if (s_Candidate)
+                ++m_Stats.candidates_inspected;
             else
                 ++m_Stats.entities_inspected;
             m_Stats.last_executed_frame = p_Frame.frame;
@@ -517,6 +556,8 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
 
             if (s_Players)
                 InspectPlayers(*s_Pending, p_Frame, s_Result);
+            else if (s_Candidate)
+                InspectCandidate(*s_Pending, p_Frame, s_Result);
             else
                 InspectEntity(*s_Pending, p_Frame, s_Result);
 
