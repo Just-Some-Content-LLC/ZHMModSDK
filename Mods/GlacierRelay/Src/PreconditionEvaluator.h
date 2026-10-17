@@ -79,6 +79,12 @@ namespace PreconditionEvaluator
         bool link_generation_unchanged = true;
         bool on_expected_thread = true;
         bool effectful_latched = false;
+
+        // M6-F (candidate.transform.set v1): the common rules only — generations, predicate and
+        // stability, contract evidence, scene, epoch — plus the link, thread and latch rules; the
+        // outfit-specific rules (6–9 and the tuple rules of 10) do not apply to a transform and are
+        // evaluated by TransformApply::EvaluateTransform instead. Never set for an outfit command.
+        bool transform_gate = false;
     };
 
     enum class Reason

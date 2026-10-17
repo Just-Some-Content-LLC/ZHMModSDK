@@ -18,6 +18,7 @@
 #include "SceneState.h"
 #include "TelemetryNormalizer.h"
 #include "TelemetryQueue.h"
+#include "TransformApplier.h"
 
 struct SGameUpdateEvent;
 class ZAchievementManagerSimple;
@@ -81,6 +82,10 @@ private:
     // same way.
     CandidateObservation::CandidateReads InspectCandidate(const CandidateObservation::CandidateQuery& p_Query);
 
+    // M6-F: the scheduler's read-only exact-transform inspector (relay.inspect.candidate_transform),
+    // guarded the same way.
+    TransformObservation::Reads InspectCandidateTransform();
+
     DECLARE_PLUGIN_DETOUR(
         GlacierRelay, void, OnTelemetryEventSent, ZAchievementManagerSimple* th, uint32_t eventIndex,
         const ZDynamicObject& event
@@ -131,6 +136,7 @@ private:
     std::unique_ptr<CommandLink> m_CommandLink;
     std::unique_ptr<CommandScheduler> m_CommandScheduler;
     std::unique_ptr<EngineOutfitApplier> m_OutfitApplier; // M5 C-2B; null unless [command] effectful = true
+    std::unique_ptr<EngineTransformApplier> m_TransformApplier; // M6-F; null unless [command] effectful = true
 
     // M5 C-1 transition instrumentation (only maintained when the command link is enabled; the
     // tee is owned by the adapter's sink chain and this is a non-owning view for its stats).

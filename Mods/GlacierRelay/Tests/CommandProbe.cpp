@@ -59,6 +59,19 @@
 // candidate inspection reports (relay.inspect.candidate); the modes are documented in
 // FakeCandidate.h ("default" = the candidate brick absent). Every value is scripted and is never an
 // observation of HITMAN.
+// transform-mode (M6-F): the FAKE exact-transform world the inspection (relay.inspect.candidate_transform)
+// and the transform apply (candidate.transform.set) read: "present" (default: the candidate resolved,
+// distinct, in no slot, clean, at the M6-D1b shape; absent at the menu), "absent", "local-hero-alias",
+// "wrong-brick-owner", "index-invalid", "in-registry", "inconclusive-slot", "dirty-preimage",
+// "no-spatial", "no-hitman5", "hero-unavailable", "registry-unavailable", "twin-bits" (the candidate's
+// z carries the seven-digit twin of the M6-D1b value: the expectation must differ bit for bit).
+// transform-apply-mode (M6-F, effectful only): "ok" (the fake setter stores the twelve requested
+// words), "unchanged", "elsewhere", "axes-elsewhere", "local-follows", "dirty-post", "readback-missing",
+// "post-generation", "post-parent", "post-entity", "fault", "control-changes", "control-drifts",
+// "exit-after-call" (as the outfit mode of that name); the log-* apply modes above also script the
+// FIRST "applying candidate.transform.set/1" line. transform-later (M6-F): what the first inspection
+// AFTER a fake lift shows — "held" (default), "returned", "near", "drifted", "dirty". Every value is
+// scripted and is never an observation of HITMAN; no engine, no SDK function.
 // Exit code 0 when the link connected and was welcomed at least once.
 
 #include <Windows.h>
@@ -76,6 +89,7 @@
 #include "CommandScheduler.h"
 #include "FakeCandidate.h"
 #include "FakeOutfitApplier.h"
+#include "FakeTransformApplier.h"
 #include "PlayerObservation.h"
 #include "RelayAdapter.h"
 #include "RelayLog.h"
@@ -543,6 +557,58 @@ namespace
         void Release() override { inner.Release(); }
     };
 
+    // M6-F: the probe's FAKE transform applier shares one scripted transform world with the probe's
+    // exact-transform inspector, so an inspection after a fake lift reports the words the fake setter
+    // left (and the scripted later frame once). Never HITMAN state; no engine pointer exists here.
+    class ProbeTransformApplier final : public TransformApply::ITransformApplier
+    {
+    public:
+        FakeTransform::Applier inner;     // the scripted state machine the tests use
+        const FakeWorld* world = nullptr; // the frame's scripted scene (generation, hero presence)
+        bool exit_after_call = false;
+
+        void SyncFrame()
+        {
+            inner.world.hero_readable = world && world->hero_present && !hero_unavailable;
+            inner.world.fresh_generation = world ? world->registry_generation : "";
+            inner.world.fresh_unavailable = !world || world->registry_generation.empty();
+            if (inner.world.mode != FakeTransform::Mode::PostGenerationChange || inner.invokes == 0)
+                inner.world.post_generation = inner.world.fresh_generation;
+            // the candidate exists only in a mission world (the content is Paris-scoped)
+            inner.world.brick_present = world && world->playing && !absent;
+        }
+
+        bool absent = false;
+        bool hero_unavailable = false;
+
+        TransformObservation::Reads Observe() override
+        {
+            SyncFrame();
+            return inner.Observe();
+        }
+
+        TransformApply::CallOutcome Invoke(const FloatWords::Words12& p_World) override
+        {
+            const auto s_Outcome = inner.Invoke(p_World);
+            RelayLog::Info("command probe: FAKE transform setter invoked (world {}); called {} faulted {} — simulated, no engine", FloatWords::Encode(p_World), s_Outcome.called, s_Outcome.faulted);
+            std::printf("command probe: FAKE transform setter invoked (world %s); called %d faulted %d (simulated; no engine)\n", FloatWords::Encode(p_World).c_str(), s_Outcome.called ? 1 : 0, s_Outcome.faulted ? 1 : 0);
+
+            if (exit_after_call)
+            {
+                RelayLog::Info("command probe: terminating the process right after the FAKE transform setter returned (simulated link loss after application, before the result)");
+                std::printf("command probe: terminating the process right after the FAKE transform setter returned (simulated link loss after application, before the result)\n");
+                std::fflush(stdout);
+                TerminateProcess(GetCurrentProcess(), 3);
+            }
+
+            return s_Outcome;
+        }
+
+        TransformObservation::Reads ReadBack() override { return inner.ReadBack(); }
+        bool Latched() const override { return inner.Latched(); }
+        void Release() override { inner.Release(); }
+    };
+
     // M5 C-2C: the scripted raw log writer for the "log-*" apply modes. Installed through
     // RelayLog::SetRawWriterForTests (the test seam of correction B; never set in the DLL), so the
     // production WriteLine / WriteChecked / OutfitApply path runs unchanged and only the lowest
@@ -570,7 +636,8 @@ namespace
 
     RelayLog::RawWrite ScriptedRawWrite(const char* p_Data, uint32_t p_Size)
     {
-        const bool s_Applying = std::string_view(p_Data, p_Size).find("applying player.outfit.set/2") != std::string_view::npos;
+        const std::string_view s_Line(p_Data, p_Size);
+        const bool s_Applying = s_Line.find("applying player.outfit.set/2") != std::string_view::npos || s_Line.find("applying candidate.transform.set/1") != std::string_view::npos;
         if (!s_Applying || g_ApplyingLinesSeen++ != 0 || g_LogMode == LogMode::None)
         {
             if (s_Applying)
@@ -627,7 +694,7 @@ int main(int p_Argc, char** p_Argv)
 {
     if (p_Argc < 4)
     {
-        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short] [default|registry-unavailable|layout-unsupported|extra-slot|hero-missing|candidate-present|roundtrip-different|roundtrip-unrepresentable|factory-mismatch|subentity-missing|bricks-empty|bricks-oversized|dirty-transform|invalid-flags|index-at-count|index-beyond-count|count-negative|count-zero|bricks-at-bound|bricks-oversized-candidate|texts-maximal|texts-maximal-candidate|texts-escaped|reasons-maximal] [candidate-mode: default|candidate-present|candidate-incomplete|candidate-in-slot|candidate-in-slot-nohero|spawn-other|spawn-missing|entity-missing|hero-interface-missing|parent-none|parent-unavailable|dirty-transform|hidden|active-unavailable|active-getter|registry-unavailable|count-invalid|index-at-count|bricks-oversized|texts-maximal|reasons-maximal|scene-unavailable]\n");
+        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short] [default|registry-unavailable|layout-unsupported|extra-slot|hero-missing|candidate-present|roundtrip-different|roundtrip-unrepresentable|factory-mismatch|subentity-missing|bricks-empty|bricks-oversized|dirty-transform|invalid-flags|index-at-count|index-beyond-count|count-negative|count-zero|bricks-at-bound|bricks-oversized-candidate|texts-maximal|texts-maximal-candidate|texts-escaped|reasons-maximal] [candidate-mode: default|candidate-present|candidate-incomplete|candidate-in-slot|candidate-in-slot-nohero|spawn-other|spawn-missing|entity-missing|hero-interface-missing|parent-none|parent-unavailable|dirty-transform|hidden|active-unavailable|active-getter|registry-unavailable|count-invalid|index-at-count|bricks-oversized|texts-maximal|reasons-maximal|scene-unavailable] [transform-mode: present|absent|local-hero-alias|wrong-brick-owner|index-invalid|in-registry|inconclusive-slot|dirty-preimage|no-spatial|no-hitman5|hero-unavailable|registry-unavailable|twin-bits] [transform-apply-mode: ok|unchanged|elsewhere|axes-elsewhere|local-follows|dirty-post|readback-missing|post-generation|post-parent|post-entity|fault|control-changes|control-drifts|exit-after-call] [transform-later: held|returned|near|drifted|dirty]\n");
         return 2;
     }
 
@@ -639,6 +706,9 @@ int main(int p_Argc, char** p_Argv)
     const std::string s_ApplyMode = p_Argc > 6 ? p_Argv[6] : "ok";
     const std::string s_PlayersMode = p_Argc > 7 ? p_Argv[7] : "default"; // M6-B1
     const std::string s_CandidateMode = p_Argc > 8 ? p_Argv[8] : "default"; // M6-D1a
+    const std::string s_TransformMode = p_Argc > 9 ? p_Argv[9] : "present"; // M6-F
+    const std::string s_TransformApplyMode = p_Argc > 10 ? p_Argv[10] : "ok"; // M6-F
+    const std::string s_TransformLater = p_Argc > 11 ? p_Argv[11] : "held"; // M6-F
 
     // The test token comes from the environment only (never a file, never an argument that a
     // transcript would show); it is never printed.
@@ -654,6 +724,8 @@ int main(int p_Argc, char** p_Argv)
     RelayLog::Info("command probe: adapter instance {}, port {}, frame interval {} ms, duration {} ms, scene {}, {} , apply-mode {}, players-mode {}, token {}, main thread {} (FAKE frame source, FAKE inspection data, FAKE registry/entity data and FAKE applier; never HITMAN state)", s_Adapter, s_Port, s_Interval, s_Duration, s_SceneMode, s_Effectful ? "effectful" : "inert", s_ApplyMode, s_PlayersMode, s_Token.empty() ? "absent (protocol version 1)" : "present (protocol version 2; not logged)", GetCurrentThreadId());
     std::printf("command probe: players-mode %s (FAKE registry, brick, entity and transform data; never HITMAN state)\n", s_PlayersMode.c_str());
     std::printf("command probe: candidate-mode %s (FAKE candidate, spawn and registry-identity data for relay.inspect.candidate; never HITMAN state)\n", s_CandidateMode.c_str());
+    std::printf("command probe: transform-mode %s transform-apply-mode %s transform-later %s (FAKE exact-transform words for relay.inspect.candidate_transform and candidate.transform.set; never HITMAN state)\n", s_TransformMode.c_str(), s_TransformApplyMode.c_str(), s_TransformLater.c_str());
+    RelayLog::Info("command probe: transform-mode {} transform-apply-mode {} transform-later {} (FAKE exact-transform words; never HITMAN state)", s_TransformMode, s_TransformApplyMode, s_TransformLater);
     RelayLog::Info("command probe: candidate-mode {} (FAKE candidate, spawn and registry-identity data; never HITMAN state)", s_CandidateMode);
     std::printf("command probe: adapter instance %s, port %u, frame interval %u ms, duration %u ms, scene %s, %s, apply-mode %s, token %s, main thread %lu (fake frame source, fake inspection data and fake applier)\n", s_Adapter.c_str(), s_Port, s_Interval, s_Duration, s_SceneMode.c_str(), s_Effectful ? "effectful" : "inert", s_ApplyMode.c_str(), s_Token.empty() ? "absent (v1)" : "present (v2; not printed)", GetCurrentThreadId());
 
@@ -675,6 +747,45 @@ int main(int p_Argc, char** p_Argv)
     else if (s_ApplyMode == "log-failed") g_LogMode = LogMode::Failed;
     else if (s_ApplyMode == "log-short") g_LogMode = LogMode::Short;
     const bool s_SetterUnavailable = s_ApplyMode == "setter-unavailable";
+
+    // M6-F: the FAKE transform world and applier, scripted per transform-mode / transform-apply-mode / transform-later.
+    ProbeTransformApplier s_Transform;
+    {
+        auto& w = s_Transform.inner.world;
+        if (s_TransformMode == "absent") s_Transform.absent = true;
+        else if (s_TransformMode == "local-hero-alias") w.distinct = false;
+        else if (s_TransformMode == "wrong-brick-owner") w.owner_match = false;
+        else if (s_TransformMode == "index-invalid") w.index_in_range = false;
+        else if (s_TransformMode == "in-registry") w.in_registry = true;
+        else if (s_TransformMode == "inconclusive-slot") w.inconclusive_slot = true;
+        else if (s_TransformMode == "dirty-preimage") w.dirty = true;
+        else if (s_TransformMode == "no-spatial") w.spatial = false;
+        else if (s_TransformMode == "no-hitman5") w.hitman5 = false;
+        else if (s_TransformMode == "hero-unavailable") s_Transform.hero_unavailable = true;
+        else if (s_TransformMode == "registry-unavailable") w.registry_readable = false;
+        else if (s_TransformMode == "twin-bits") { w.world.w[11] = FloatWords::ToWord(-1.539356f) + 1; w.local.w[2] = w.world.w[11]; }
+
+        using FakeTransform::Mode;
+        if (s_TransformApplyMode == "unchanged") w.mode = Mode::Unchanged;
+        else if (s_TransformApplyMode == "elsewhere") w.mode = Mode::Elsewhere;
+        else if (s_TransformApplyMode == "axes-elsewhere") w.mode = Mode::AxesElsewhere;
+        else if (s_TransformApplyMode == "local-follows") w.mode = Mode::LocalFollows;
+        else if (s_TransformApplyMode == "dirty-post") w.mode = Mode::DirtyPost;
+        else if (s_TransformApplyMode == "readback-missing") w.mode = Mode::ReadBackUnavailable;
+        else if (s_TransformApplyMode == "post-generation") w.mode = Mode::PostGenerationChange;
+        else if (s_TransformApplyMode == "post-parent") w.mode = Mode::PostParentChange;
+        else if (s_TransformApplyMode == "post-entity") w.mode = Mode::PostEntityChange;
+        else if (s_TransformApplyMode == "fault") w.mode = Mode::FaultDuringCall;
+        else if (s_TransformApplyMode == "control-changes") w.mode = Mode::ControlChanges;
+        else if (s_TransformApplyMode == "control-drifts") w.mode = Mode::ControlDrifts;
+        else if (s_TransformApplyMode == "exit-after-call") s_Transform.exit_after_call = true;
+
+        using FakeTransform::Later;
+        if (s_TransformLater == "returned") w.later = Later::Returned;
+        else if (s_TransformLater == "near") w.later = Later::Near;
+        else if (s_TransformLater == "drifted") w.later = Later::Drifted;
+        else if (s_TransformLater == "dirty") w.later = Later::Dirty;
+    }
 
     if (g_LogMode != LogMode::None)
     {
@@ -720,6 +831,7 @@ int main(int p_Argc, char** p_Argv)
         FakeWorld s_World;
         s_World.setter_available = !s_SetterUnavailable;
         s_Applier.world = &s_World;
+        s_Transform.world = &s_World;
 
         auto s_Advance = [&](const char* p_Why) {
             ++s_Epoch;
@@ -815,6 +927,9 @@ int main(int p_Argc, char** p_Argv)
             s_Observation.entity_inspector = [&](const PlayerObservation::EntityQuery& p_Query) { return FakeEntity(s_World, s_PlayersMode, p_Query); };
             // M6-D1a: the FAKE candidate reader (scripted per candidate-mode; never HITMAN state)
             s_Observation.candidate_inspector = [&](const CandidateObservation::CandidateQuery& p_Query) { return FakeCandidate::Reads(s_CandidateMode, s_World.playing, s_World.registry_generation, p_Query); };
+            // M6-F: the FAKE exact-transform reader (the same scripted world the fake applier mutates) and the applier
+            s_Observation.transform_inspector = [&] { return s_Transform.Observe(); };
+            s_Observation.transform_applier = s_Effectful ? &s_Transform : nullptr;
             s_Observation.link_generation_now = [&] { return s_Link.LinkGeneration(); };
 
             s_Link.SetMissionGeneration(s_Observation.mission_generation);
@@ -842,6 +957,14 @@ int main(int p_Argc, char** p_Argv)
         s_Queued.pushed, s_Queued.popped, s_Queued.busy, s_Queued.duplicates, s_Queued.cleared, s_Queued.remembered, s_Scheduled.frames, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.players_inspected, s_Scheduled.entities_inspected, s_Scheduled.candidates_inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.outfit_not_applied, s_Scheduled.outfit_uncertain, s_Scheduled.reduced, s_Scheduled.unbounded, s_Scheduled.expired, s_Scheduled.stale_generation, s_Scheduled.rejected, s_Scheduled.first_thread_id, s_Scheduled.last_thread_id, s_Scheduled.thread_changed ? 1 : 0, s_Scheduled.last_latency_ms, s_Scheduled.max_latency_ms,
         s_Applier.inner.observes, s_Applier.inner.invokes, s_Applier.inner.readbacks, s_Applier.inner.Latched() ? 1 : 0
     );
+    const auto& s_Ledger = s_Scheduler.TransformLedger();
+    std::printf(
+        "command probe: transform inspected %llu dispatched %llu called %llu changed %llu not_applied %llu uncertain %llu; ledger state %s budget %u forward %s link %llu effect %s invalidated '%s'; FAKE transform applier observes %d invokes %d readbacks %d latched %d\n",
+        s_Scheduled.transforms_inspected, s_Scheduled.transform_dispatched, s_Scheduled.transform_called, s_Scheduled.transform_changed, s_Scheduled.transform_not_applied, s_Scheduled.transform_uncertain,
+        TransformApply::StateText(s_Ledger.state), s_Ledger.forward_budget, s_Ledger.forward_id.empty() ? "-" : s_Ledger.forward_id.c_str(), s_Ledger.link_generation, OutfitApply::EffectText(s_Ledger.forward_effect), s_Ledger.invalidated_reason.c_str(),
+        s_Transform.inner.observes, s_Transform.inner.invokes, s_Transform.inner.readbacks, s_Transform.inner.Latched() ? 1 : 0
+    );
+    RelayLog::Info("command probe: transform inspected {} dispatched {} called {} changed {}; ledger {} budget {}", s_Scheduled.transforms_inspected, s_Scheduled.transform_dispatched, s_Scheduled.transform_called, s_Scheduled.transform_changed, TransformApply::StateText(s_Ledger.state), s_Ledger.forward_budget);
     RelayLog::Info("command probe: done after {} fake frames; connects {}, executed {}, inspected {}, players inspected {}, entities inspected {}, candidates inspected {}, outfit dispatched {} called {} changed {}, expired {}, violations {}", s_Frames, s_Stats.connects, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.players_inspected, s_Scheduled.entities_inspected, s_Scheduled.candidates_inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.expired, s_Stats.protocol_violations);
 
     return s_Stats.connects > 0 ? 0 : 1;

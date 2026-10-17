@@ -9,9 +9,11 @@
 #include "OutfitObservation.h"
 #include "PlayerObservation.h"
 #include "SceneState.h"
+#include "TransformObservation.h"
 
 class ZHitman5;
 class ZGlobalOutfitKit;
+class ZSpatialEntity;
 
 // Glacier-facing reads. These functions are the only place in the adapter that touches SDK types,
 // apart from the plugin class itself and the outfit applier. Each is a read of engine state the
@@ -81,4 +83,27 @@ namespace SceneObservation
     // local hero and the candidate on this frame. No write, no setter, no cache-refreshing getter,
     // no raw pointer dereference, no cache, no pointer leaves this function.
     CandidateObservation::CandidateReads ObserveCandidate(const CandidateObservation::CandidateQuery& p_Query);
+
+    // M6-F: the references the transform applier needs on the applying frame — the compiled
+    // candidate, its spatial interface and the local hero, as resolved by ObserveCandidateTransform
+    // on that same frame; valid for that frame only and released by the applier before it ends.
+    // previous_read lets the applier's post read compare the re-resolved candidate by identity.
+    struct TransformHandles
+    {
+        ZEntityRef candidate;
+        ZSpatialEntity* spatial = nullptr;
+        ZEntityRef hero;
+        bool previous_read = false;
+    };
+
+    // M6-F (relay.inspect.candidate_transform; the transform apply's reads): on this frame, the
+    // compiled candidate (hitmen.brick / Agent48 through the same bounded brick scan and
+    // template-factory lookup as M6-D1a) and the local hero (registry slot 0): the exact stored
+    // transform words (m_mTransform's twelve floats as bit patterns — never through
+    // GetObjectToWorldMatrix; the seven parent-relative floats), the dirty flag, the parent's
+    // authored id, the visibility bits, the identity block, whether the candidate's spatial
+    // interface differs from the hero's, and the registry slots by identity with the membership
+    // verdict. No write, no setter, no cache-refreshing getter, no property allocation, no cache;
+    // no pointer leaves this function except, for the transform applier only, into p_Handles.
+    TransformObservation::Reads ObserveCandidateTransform(TransformHandles* p_Handles = nullptr);
 }

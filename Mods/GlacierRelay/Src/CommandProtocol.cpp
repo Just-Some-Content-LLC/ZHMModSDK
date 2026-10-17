@@ -56,12 +56,21 @@ namespace CommandProtocol
             return Entry::RelayInspectEntity1;
         if (p_Name == "relay.inspect.candidate" && p_Version == 1)
             return Entry::RelayInspectCandidate1;
+        if (p_Name == "relay.inspect.candidate_transform" && p_Version == 1)
+            return Entry::RelayInspectCandidateTransform1;
+        if (p_Name == "candidate.transform.set" && p_Version == 1)
+            return Entry::CandidateTransformSet1;
         return Entry::Unknown;
     }
 
     bool IsEffectful(Entry p_Entry)
     {
-        return p_Entry == Entry::PlayerOutfitSet2;
+        return p_Entry == Entry::PlayerOutfitSet2 || p_Entry == Entry::CandidateTransformSet1;
+    }
+
+    const char* TransformModeText(TransformMode p_Mode)
+    {
+        return p_Mode == TransformMode::Restore ? "restore" : "lift";
     }
 
     bool ValidHex16(std::string_view p_Text)
@@ -322,6 +331,74 @@ namespace CommandProtocol
                 if (!s_Params->fields.empty())
                     return Reject(s_Out, "unknown parameter: " + s_Params->fields.front().first);
                 break;
+
+            case Entry::RelayInspectCandidateTransform1:
+                // M6-F: no parameters; the candidate is compiled, nothing is addressable by a peer.
+                if (!s_Params->fields.empty())
+                    return Reject(s_Out, "unknown parameter: " + s_Params->fields.front().first);
+                break;
+
+            case Entry::CandidateTransformSet1:
+            {
+                // M6-F (design section 12.5): the mode, the exact expectation groups and parent of a
+                // recent exact inspection, and for a restore the journaled preimage world group and
+                // the original command id; nothing else; the mandatory mission_generation
+                // precondition; a restore already at its target is refused as a no-op; and none of
+                // it unless the effectful setting is on (otherwise rejected like the reserved entry).
+                if (!p_Options.effectful)
+                    return Reject(s_Out, "effectful setting disabled: candidate.transform.set/1 not executable");
+
+                if (!KnownKeys(*s_Params, {"mode", "expect_world", "expect_local", "expect_parent", "target_world", "restore_of"}, s_Unknown))
+                    return Reject(s_Out, "unknown parameter: " + s_Unknown);
+
+                TransformRequest s_Request;
+                std::string s_Why;
+                const Value* s_Mode = s_Params->Find("mode");
+                if (!IsText(s_Mode, 16) || (s_Mode->text != "lift" && s_Mode->text != "restore"))
+                    return Reject(s_Out, "invalid parameter: mode (missing or not lift|restore)");
+                s_Request.mode = s_Mode->text == "restore" ? TransformMode::Restore : TransformMode::Lift;
+
+                const Value* s_ExpectWorld = s_Params->Find("expect_world");
+                if (!IsText(s_ExpectWorld, k_MaxObservedTextBytes) || !FloatWords::Decode(s_ExpectWorld->text, s_Request.expect_world, s_Why))
+                    return Reject(s_Out, "invalid parameter: expect_world (" + (s_Why.empty() ? std::string("missing") : s_Why) + ")");
+
+                const Value* s_ExpectLocal = s_Params->Find("expect_local");
+                if (!IsText(s_ExpectLocal, k_MaxObservedTextBytes) || !FloatWords::Decode(s_ExpectLocal->text, s_Request.expect_local, s_Why))
+                    return Reject(s_Out, "invalid parameter: expect_local (" + (s_Why.empty() ? std::string("missing") : s_Why) + ")");
+
+                const Value* s_ExpectParent = s_Params->Find("expect_parent");
+                if (!IsText(s_ExpectParent, 16) || !(ValidHex16(s_ExpectParent->text) || s_ExpectParent->text == "none"))
+                    return Reject(s_Out, "invalid parameter: expect_parent (missing, or not 16 lowercase hex digits or none)");
+                s_Request.expect_parent = s_ExpectParent->text;
+
+                const Value* s_TargetWorld = s_Params->Find("target_world");
+                const Value* s_RestoreOf = s_Params->Find("restore_of");
+
+                if (s_Request.mode == TransformMode::Lift)
+                {
+                    if (s_TargetWorld || s_RestoreOf)
+                        return Reject(s_Out, "invalid parameter: a lift carries no target_world or restore_of (the displacement is compiled)");
+                }
+                else
+                {
+                    FloatWords::Words12 s_Target;
+                    if (!IsText(s_TargetWorld, k_MaxObservedTextBytes) || !FloatWords::Decode(s_TargetWorld->text, s_Target, s_Why))
+                        return Reject(s_Out, "invalid parameter: target_world (" + (s_Why.empty() ? std::string("missing") : s_Why) + ")");
+                    if (!IsText(s_RestoreOf, 36) || !ValidUuid(s_RestoreOf->text))
+                        return Reject(s_Out, "invalid parameter: restore_of (missing or not a uuid)");
+                    if (s_Target == s_Request.expect_world)
+                        return Reject(s_Out, "target_world equals expect_world: already at the restore target; a no-op is not an effectful command");
+                    s_Request.target_world = s_Target;
+                    s_Request.restore_of = s_RestoreOf->text;
+                }
+
+                if (!s_Command.mission_generation_precondition)
+                    return Reject(s_Out, "missing precondition: mission_generation");
+
+                s_Command.transform = s_Request;
+                s_Command.params.emplace_back("mode", s_Mode->text);
+                break;
+            }
 
             case Entry::RelayInspectEntity1:
             case Entry::RelayInspectCandidate1:

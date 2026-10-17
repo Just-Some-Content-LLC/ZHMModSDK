@@ -22,7 +22,10 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/CommandQueue.h
         Src/CommandScheduler.cpp
         Src/CommandScheduler.h
+        Src/FloatWords.cpp
+        Src/FloatWords.h
         Src/IOutfitApplier.h
+        Src/ITransformApplier.h
         Src/IRelaySink.h
         Src/Json.cpp
         Src/Json.h
@@ -58,6 +61,10 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/TelemetryNormalizer.h
         Src/TelemetryObservation.h
         Src/TelemetryQueue.h
+        Src/TransformApply.cpp
+        Src/TransformApply.h
+        Src/TransformObservation.cpp
+        Src/TransformObservation.h
 )
 
 set(RELAY_GLACIER_FACING_SOURCES
@@ -69,6 +76,8 @@ set(RELAY_GLACIER_FACING_SOURCES
         Src/SceneObservation.h
         Src/TelemetryIntake.cpp
         Src/TelemetryIntake.h
+        Src/TransformApplier.cpp
+        Src/TransformApplier.h
 )
 
 add_library(GlacierRelay SHARED
@@ -102,6 +111,9 @@ add_executable(GlacierRelayTests
         Tests/InspectionBoundaryTests.cpp
         Tests/CandidateInspectionTests.cpp
         Tests/PropertyGuardTests.cpp
+        Tests/TransformObservationTests.cpp
+        Tests/TransformApplyTests.cpp
+        Tests/FakeTransformApplier.h
         Tests/TestListener.h
         Tests/ContractLifecycleTests.cpp
         Tests/DisguiseTelemetryTests.cpp

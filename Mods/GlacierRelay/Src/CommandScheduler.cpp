@@ -426,6 +426,30 @@ void CommandScheduler::InspectCandidate(const CommandQueue::Pending& p_Pending, 
         p_Result.reason = "engine reads unsupported on this frame source; frame values only";
 }
 
+// relay.inspect.candidate_transform v1 (M6-F): no engine write; the compiled candidate's and the
+// local hero's exact stored transform words, dirty flags and parents, the identity block and the
+// registry, all on this frame, each field with its status.
+void CommandScheduler::InspectCandidateTransform(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, Result& p_Result)
+{
+    using OutfitObservation::Append;
+    using OutfitObservation::Field;
+
+    const uint64_t s_Age = p_Frame.now_mono_ms >= p_Pending.received_mono_ms ? p_Frame.now_mono_ms - p_Pending.received_mono_ms : 0;
+    const bool s_HaveInspector = static_cast<bool>(p_Frame.transform_inspector);
+
+    TransformObservation::Reads s_Reads = s_HaveInspector
+        ? p_Frame.transform_inspector()
+        : TransformObservation::AllUnavailable(FieldStatus::Unsupported, "no inspector on this frame source");
+
+    AppendFrameValues(p_Result, p_Frame, s_Age);
+    TransformObservation::AppendInspection(p_Result.observed, s_Reads);
+    Append(p_Result.observed, "reads_on_frame", s_HaveInspector ? Field<bool>::Observed(s_Reads.thread_id == p_Frame.thread_id) : Field<bool>::Of(FieldStatus::Unsupported, "no inspector"));
+
+    p_Result.status = Status::Applied;
+    if (!s_HaveInspector)
+        p_Result.reason = "engine reads unsupported on this frame source; frame values only";
+}
+
 bool CommandScheduler::Tick(const FrameObservation& p_Frame)
 {
     ++m_Stats.frames;
@@ -538,15 +562,19 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
         case CommandProtocol::Entry::RelayInspectPlayers1:
         case CommandProtocol::Entry::RelayInspectEntity1:
         case CommandProtocol::Entry::RelayInspectCandidate1:
+        case CommandProtocol::Entry::RelayInspectCandidateTransform1:
         {
-            // M6-B1 / M6-D1a: no engine write. The reads happen here, on this frame, through the
-            // inspector of the entry; the same reduction and line-bound invariant for all three.
+            // M6-B1 / M6-D1a / M6-F: no engine write. The reads happen here, on this frame, through
+            // the inspector of the entry; the same reduction and line-bound invariant for all four.
             const bool s_Players = s_Command.entry == CommandProtocol::Entry::RelayInspectPlayers1;
             const bool s_Candidate = s_Command.entry == CommandProtocol::Entry::RelayInspectCandidate1;
+            const bool s_Transform = s_Command.entry == CommandProtocol::Entry::RelayInspectCandidateTransform1;
             if (s_Players)
                 ++m_Stats.players_inspected;
             else if (s_Candidate)
                 ++m_Stats.candidates_inspected;
+            else if (s_Transform)
+                ++m_Stats.transforms_inspected;
             else
                 ++m_Stats.entities_inspected;
             m_Stats.last_executed_frame = p_Frame.frame;
@@ -558,6 +586,8 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
                 InspectPlayers(*s_Pending, p_Frame, s_Result);
             else if (s_Candidate)
                 InspectCandidate(*s_Pending, p_Frame, s_Result);
+            else if (s_Transform)
+                InspectCandidateTransform(*s_Pending, p_Frame, s_Result);
             else
                 InspectEntity(*s_Pending, p_Frame, s_Result);
 
@@ -602,6 +632,32 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
             }
 
             ApplyOutfit(*s_Pending, p_Frame, s_Result);
+            m_Queue.MarkDone(s_Command.command_id, s_Pending->link_generation, s_Result.status);
+            m_Emit(s_Result);
+            return true;
+        }
+
+        case CommandProtocol::Entry::CandidateTransformSet1:
+        {
+            // M6-F: the second effectful entry. Without a transform applier on this frame source
+            // (tests without one, the probe's inert modes) it is rejected, never applied.
+            ++m_Stats.transform_dispatched;
+            m_Stats.last_executed_frame = p_Frame.frame;
+            m_Stats.last_latency_ms = s_Age;
+            if (s_Age > m_Stats.max_latency_ms)
+                m_Stats.max_latency_ms = s_Age;
+
+            if (!p_Frame.transform_applier)
+            {
+                ++m_Stats.rejected;
+                s_Result.status = Status::Rejected;
+                s_Result.reason = "effectful entry not executable on this frame source (no transform applier)";
+                m_Queue.MarkDone(s_Command.command_id, s_Pending->link_generation, Status::Rejected);
+                m_Emit(s_Result);
+                return true;
+            }
+
+            ApplyTransform(*s_Pending, p_Frame, s_Result);
             m_Queue.MarkDone(s_Command.command_id, s_Pending->link_generation, s_Result.status);
             m_Emit(s_Result);
             return true;
@@ -655,6 +711,45 @@ void CommandScheduler::ApplyOutfit(const CommandQueue::Pending& p_Pending, const
         ++m_Stats.outfit_uncertain;
     if (p_Result.status == Status::PreconditionFailed || p_Result.status == Status::Unavailable)
         ++m_Stats.outfit_not_applied;
+    if (s_Outcome.reduced)
+        ++m_Stats.reduced;
+}
+
+// M6-F: the same plain frame context as the outfit apply; TransformApply drives the transform
+// applier against the scheduler's ledger and classifies the outcome.
+void CommandScheduler::ApplyTransform(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, Result& p_Result)
+{
+    OutfitApply::Context s_Context;
+    s_Context.pending = &p_Pending;
+    s_Context.frame = p_Frame.frame;
+    s_Context.now_mono_ms = p_Frame.now_mono_ms;
+    s_Context.thread_id = p_Frame.thread_id;
+    s_Context.expected_thread_id = m_Stats.first_thread_id;
+    s_Context.scene_available = p_Frame.scene_available;
+    s_Context.scene = p_Frame.scene;
+    s_Context.mission_playing = p_Frame.mission_playing;
+    s_Context.previous_frame_playing = p_Frame.previous_frame_playing;
+    s_Context.mission_generation = p_Frame.mission_generation;
+    s_Context.link_generation = p_Frame.link_generation;
+    s_Context.link_generation_now = p_Frame.link_generation_now;
+    s_Context.relay_transition_epoch = p_Frame.relay_transition_epoch;
+    s_Context.rise_frame = p_Frame.rise_frame;
+    s_Context.rise_mono_ms = p_Frame.rise_mono_ms;
+    s_Context.scene_resource_same_as_rise = p_Frame.scene_resource_same_as_rise;
+    s_Context.contract_started_seen = p_Frame.contract_started_seen;
+    s_Context.contract_ended_seen = p_Frame.contract_ended_seen;
+    s_Context.rules = m_Rules;
+
+    const auto s_Outcome = TransformApply::Apply(s_Context, *p_Frame.transform_applier, m_TransformLedger, p_Result);
+
+    if (s_Outcome.invocation != OutfitApply::Invocation::NotCalled)
+        ++m_Stats.transform_called;
+    if (s_Outcome.effect == OutfitApply::Effect::Changed)
+        ++m_Stats.transform_changed;
+    if (s_Outcome.effect == OutfitApply::Effect::Uncertain)
+        ++m_Stats.transform_uncertain;
+    if (p_Result.status == Status::PreconditionFailed || p_Result.status == Status::Unavailable)
+        ++m_Stats.transform_not_applied;
     if (s_Outcome.reduced)
         ++m_Stats.reduced;
 }

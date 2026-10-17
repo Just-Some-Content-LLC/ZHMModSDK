@@ -147,6 +147,20 @@ namespace PreconditionEvaluator
         if (p_Input.epoch_now != p_Input.epoch_at_receipt)
             s_Fail(Reason::EpochChanged);
 
+        // M6-F: a transform command stops here with the common rules and the effectful link /
+        //       thread / latch rules; its own rules live in TransformApply::EvaluateTransform.
+        if (p_Input.transform_gate)
+        {
+            if (!p_Input.link_generation_unchanged)
+                s_Fail(Reason::LinkGenerationChanged);
+            if (!p_Input.on_expected_thread)
+                s_Fail(Reason::ThreadMismatch);
+            if (p_Input.effectful_latched)
+                s_Fail(Reason::EffectfulLatched);
+            s_Verdict.ok = s_Verdict.reasons.empty();
+            return s_Verdict;
+        }
+
         // 6. The player and the outfit.
         if (!p_Input.player_available)
             s_Fail(Reason::PlayerUnavailable);

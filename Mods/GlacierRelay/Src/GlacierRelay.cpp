@@ -132,7 +132,10 @@ void GlacierRelay::OnEngineInitialized()
         s_Command.token = std::string(s_Token.ToStringView());
 
         if (s_Command.effectful)
+        {
             m_OutfitApplier = std::make_unique<EngineOutfitApplier>();
+            m_TransformApplier = std::make_unique<EngineTransformApplier>(); // M6-F
+        }
 
         m_CommandQueue = std::make_unique<CommandQueue>();
         m_CommandLink = std::make_unique<CommandLink>(s_Command, *m_CommandQueue, m_Adapter->InstanceId(), [] {
@@ -144,9 +147,9 @@ void GlacierRelay::OnEngineInitialized()
         });
 
         if (s_Command.effectful)
-            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1, relay.inspect.entity/1, relay.inspect.candidate/1 (read-only) and player.outfit.set/2 (EFFECTFUL: one guarded ZHitman5_SetOutfit call behind the applying-frame gate), one command per frame; protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
+            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1, relay.inspect.entity/1, relay.inspect.candidate/1, relay.inspect.candidate_transform/1 (read-only), player.outfit.set/2 (EFFECTFUL: one guarded ZHitman5_SetOutfit call behind the applying-frame gate) and candidate.transform.set/1 (EFFECTFUL: one guarded SetObjectToWorldMatrixFromEditor call on the compiled candidate behind the applying-frame gate and the one-forward ledger), one command per frame; protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
         else
-            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1, relay.inspect.entity/1 and relay.inspect.candidate/1 (read-only), one command per frame, no engine write ([command] effectful = false); protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
+            RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1, relay.inspect.entity/1, relay.inspect.candidate/1 and relay.inspect.candidate_transform/1 (read-only), one command per frame, no engine write ([command] effectful = false); protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
     }
     else
     {
@@ -333,6 +336,12 @@ void GlacierRelay::ScheduleCommand(const SceneState& p_Scene, bool p_PlayingBefo
     // relay.inspect.candidate command taken this frame (never on an idle frame).
     s_Observation.candidate_inspector = [this](const CandidateObservation::CandidateQuery& p_Query) { return InspectCandidate(p_Query); };
 
+    // M6-F: the read-only exact-transform inspector (called by the scheduler on this frame only for
+    // a relay.inspect.candidate_transform command taken this frame) and the transform applier,
+    // only when the effectful setting constructed it.
+    s_Observation.transform_inspector = [this] { return InspectCandidateTransform(); };
+    s_Observation.transform_applier = m_TransformApplier.get();
+
     // M5 C-2B: the applier only when the effectful setting constructed it; the link generation
     // re-read immediately before any setter call.
     s_Observation.applier = m_OutfitApplier.get();
@@ -498,6 +507,27 @@ CandidateObservation::CandidateReads GlacierRelay::InspectCandidate(const Candid
     if (!s_Completed)
     {
         auto s_Faulted = CandidateObservation::AllCandidate(CommandProtocol::FieldStatus::Unavailable, "candidate reads faulted", p_Query);
+        s_Faulted.thread_id = GetCurrentThreadId();
+        return s_Faulted;
+    }
+
+    return s_Reads;
+}
+
+// M6-F: the exact-transform inspection under its own fault guard, as above.
+TransformObservation::Reads GlacierRelay::InspectCandidateTransform()
+{
+    TransformObservation::Reads s_Reads;
+    bool s_Completed = false;
+
+    RelayLog::Guard("InspectCandidateTransform", [&] {
+        s_Reads = SceneObservation::ObserveCandidateTransform();
+        s_Completed = true;
+    });
+
+    if (!s_Completed)
+    {
+        auto s_Faulted = TransformObservation::AllUnavailable(CommandProtocol::FieldStatus::Unavailable, "transform reads faulted");
         s_Faulted.thread_id = GetCurrentThreadId();
         return s_Faulted;
     }

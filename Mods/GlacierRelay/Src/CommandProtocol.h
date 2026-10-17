@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "FloatWords.h"
+
 // The command protocol, versions 1 and 2, as BEAM's GlacierRelay.Command.Schema defines it
 // (glacier-relay docs/design/M5_COMMAND_CHANNEL.md sections 5, 17.4, 26.2 and 27; ADR 0009). The
 // native side decodes what BEAM writes (welcome, command, refused) and encodes what BEAM reads
@@ -85,7 +87,13 @@ namespace CommandProtocol
     // the same two optional 16-hex-digit parameters as relay.inspect.entity) is executable and
     // inert; player.outfit.set v1 is reserved (documented, decoded, never executed);
     // player.outfit.set v2 (M5 C-2B) is the effectful entry, decodable only on a version-2 link
-    // with the effectful setting on; any other name/version is unknown.
+    // with the effectful setting on; relay.inspect.candidate_transform v1 (M6-F; read-only, no
+    // parameters: the compiled candidate's and the local hero's exact stored transform words) is
+    // executable and inert; candidate.transform.set v1 (M6-F) is the second effectful entry,
+    // decodable under the same setting: a "lift" (the compiled +0.25 world-z displacement of the
+    // compiled candidate, computed natively) or a "restore" (the journaled preimage world group of
+    // one earlier lift, bound to it), each with the exact expectation groups of a recent exact
+    // inspection; any other name/version is unknown.
     enum class Entry
     {
         Unknown,
@@ -96,6 +104,31 @@ namespace CommandProtocol
         RelayInspectPlayers1,
         RelayInspectEntity1,
         RelayInspectCandidate1,
+        RelayInspectCandidateTransform1,
+        CandidateTransformSet1,
+    };
+
+    // candidate.transform.set v1 (M6-F; design section 12.5): the mode, the exact expectation of
+    // the current state (the world and parent-relative groups and the parent id of a recent exact
+    // inspection), and for a restore the journaled preimage world group and the original command
+    // it restores. Nothing else: no location, direction, rotation, scale, distance, entity,
+    // pointer or function name is a parameter.
+    enum class TransformMode
+    {
+        Lift,
+        Restore,
+    };
+
+    const char* TransformModeText(TransformMode p_Mode);
+
+    struct TransformRequest
+    {
+        TransformMode mode = TransformMode::Lift;
+        FloatWords::Words12 expect_world;
+        FloatWords::Words7 expect_local;
+        std::string expect_parent;                          // 16 lowercase hex, or "none"
+        std::optional<FloatWords::Words12> target_world;    // restore only
+        std::optional<std::string> restore_of;              // restore only: the original lift's command id
     };
 
     Entry Lookup(std::string_view p_Name, uint32_t p_Version);
@@ -135,6 +168,9 @@ namespace CommandProtocol
         // player.outfit.set v2 only: the requested tuple and the mandatory expected-current tuple.
         std::optional<OutfitTuple> outfit_target;
         std::optional<OutfitTuple> outfit_expect_current;
+
+        // candidate.transform.set v1 only (M6-F).
+        std::optional<TransformRequest> transform;
     };
 
     struct DecodedCommand

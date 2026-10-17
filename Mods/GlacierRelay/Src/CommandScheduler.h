@@ -9,10 +9,13 @@
 #include "CommandProtocol.h"
 #include "CommandQueue.h"
 #include "IOutfitApplier.h"
+#include "ITransformApplier.h"
 #include "OutfitObservation.h"
 #include "PlayerObservation.h"
 #include "PreconditionEvaluator.h"
 #include "SceneState.h"
+#include "TransformApply.h"
+#include "TransformObservation.h"
 
 // The frame-update side of the command path (M5-B, extended in M5 C-1 and C-2B): at most one
 // queued command per frame, judged on that frame's own observation. Engine-independent: the plugin
@@ -48,6 +51,9 @@ public:
     // engine reads on this frame only, nothing cached, null in tests and in the probe's default
     // mode (reported as unsupported).
     using CandidateInspector = std::function<CandidateObservation::CandidateReads(const CandidateObservation::CandidateQuery& p_Query)>;
+
+    // M6-F: the read-only exact-transform inspection (relay.inspect.candidate_transform). Same rule.
+    using TransformInspector = std::function<TransformObservation::Reads()>;
 
     struct FrameObservation
     {
@@ -86,6 +92,11 @@ public:
 
         // M6-D1a (null: the candidate reads are unsupported on this frame source).
         CandidateInspector candidate_inspector;
+
+        // M6-F (null: the exact transform reads are unsupported; the transform entry is rejected on
+        // this frame source). The applier is null unless the plugin's effectful setting is on.
+        TransformInspector transform_inspector;
+        TransformApply::ITransformApplier* transform_applier = nullptr;
     };
 
     struct Stats
@@ -109,6 +120,13 @@ public:
         uint64_t unbounded = 0;          // M6-B1 hardening B: a result still over the line bound after reduction (never emitted as valid; expected 0)
         // M6-D1a
         uint64_t candidates_inspected = 0; // relay.inspect.candidate applied
+        // M6-F
+        uint64_t transforms_inspected = 0;  // relay.inspect.candidate_transform applied
+        uint64_t transform_dispatched = 0;  // candidate.transform.set v1 commands that reached the apply
+        uint64_t transform_called = 0;      // the setter was invoked (once per dispatch at most)
+        uint64_t transform_changed = 0;     // classified changed
+        uint64_t transform_not_applied = 0; // precondition_failed or unavailable
+        uint64_t transform_uncertain = 0;   // classified uncertain (incl. faults)
         uint32_t first_thread_id = 0;
         uint32_t last_thread_id = 0;
         bool thread_changed = false; // the scheduler was invoked from more than one thread
@@ -129,6 +147,10 @@ public:
     bool Tick(const FrameObservation& p_Frame);
 
     Stats GetStats() const { return m_Stats; }
+
+    // M6-F: the native ledger (plain values; the process's one forward budget and the operation
+    // record), readable for the probe's and the tests' reports.
+    const TransformApply::Ledger& TransformLedger() const { return m_TransformLedger; }
 
     // M6-B1 (hardened in the M6-B1 hardening stage, correction B): reduces a result until its
     // ACTUAL encoded line — escaped strings in their encoded form, the encoder's own truncations,
@@ -155,10 +177,14 @@ private:
     void InspectEntity(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
     // M6-D1a
     void InspectCandidate(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
+    // M6-F
+    void InspectCandidateTransform(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
+    void ApplyTransform(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
 
 private:
     CommandQueue& m_Queue;
     Emit m_Emit;
     PreconditionEvaluator::Rules m_Rules;
     Stats m_Stats;
+    TransformApply::Ledger m_TransformLedger; // M6-F
 };
