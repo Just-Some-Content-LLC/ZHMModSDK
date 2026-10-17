@@ -765,7 +765,7 @@ int main(int p_Argc, char** p_Argv)
         else if (s_TransformMode == "no-hitman5") w.hitman5 = false;
         else if (s_TransformMode == "hero-unavailable") s_Transform.hero_unavailable = true;
         else if (s_TransformMode == "registry-unavailable") w.registry_readable = false;
-        else if (s_TransformMode == "twin-bits") { w.world.w[11] = FloatWords::ToWord(-1.539356f) + 1; w.local.w[2] = w.world.w[11]; }
+        else if (s_TransformMode == "twin-bits") { w.world.w[11] += 1; w.local.w[2] = w.world.w[11]; } // the seven-digit twin of the FAKE world's own z word
 
         using FakeTransform::Mode;
         if (s_TransformApplyMode == "unchanged") w.mode = Mode::Unchanged;
