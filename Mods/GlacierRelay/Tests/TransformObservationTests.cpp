@@ -142,7 +142,7 @@ void RunTransformObservationTests()
         CHECK(s_Line.size() <= k_MaxLineBytes);
         CHECK(TextField(s_Result, "cand_world_words") == FloatWords::Encode(s_Fake.world.world));
         CHECK(TextField(s_Result, "cand_local_words") == FloatWords::Encode(s_Fake.world.local));
-        CHECK(TextField(s_Result, "cand_world") == "0,0,-1.539356" && TextField(s_Result, "cand_local") == "0,0,-1.539356|0,0,0,1");
+        CHECK(TextField(s_Result, "cand_world") == "-40.99882,-24.29366,0.4925565" && TextField(s_Result, "cand_local") == "-40.99882,-24.29366,0.4925565|0,0,0,1");
         CHECK(TextField(s_Result, "hero_world_words") == FloatWords::Encode(s_Fake.world.hero_world));
         CHECK(TextField(s_Result, "targets") == std::string(TransformObservation::k_Brick) + "," + TransformObservation::k_Entity);
         CHECK(TextField(s_Result, "registry_slots") == FakeTransform::k_LocalOnly);

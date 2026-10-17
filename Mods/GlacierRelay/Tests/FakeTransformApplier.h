@@ -11,8 +11,10 @@
 // never constructs an engine pointer, valid or invalid, and never calls an SDK function; every
 // value it reports is simulated and is labelled so wherever it is printed. It counts its calls so
 // a test can prove the approved call happens exactly once on success and never on a refusal. The
-// scripted candidate words are the M6-D1b observation's shape (identity axes, translation
-// (0, 0, -1.539356f)), so the offline matrix exercises the real lift target bit for bit.
+// scripted candidate and hero are the probe's shared FAKE world (FakeCandidate.h / the FAKE entity
+// reader: the candidate at the authored spawn position (-40.99882, -24.293657, 0.4925565) with the
+// identity axes, the hero feed9a0d70d546f4 at (-0.035, -3.832, -0.413)), so the operator cross-checks
+// compare like with like; the M6-D1b observation's real words are exercised by the codec tests.
 namespace FakeTransform
 {
     using FloatWords::Words12;
@@ -54,8 +56,8 @@ namespace FakeTransform
     constexpr const char* k_Gen2 = "2516103582027577704-30ccebb9-8138-4c72-9eb9-1a289b4fba33";
     constexpr const char* k_Brick = TransformObservation::k_Brick;
     constexpr const char* k_Entity = TransformObservation::k_Entity;
-    constexpr const char* k_HeroId = "69bdf7f855ea15e0";
-    constexpr const char* k_HeroParent = "00b6cedd6778f19c";
+    constexpr const char* k_HeroId = "feed9a0d70d546f4";
+    constexpr const char* k_HeroParent = "0000000000000001";
     constexpr const char* k_LocalOnly = "0:local,1:empty,2:empty,3:empty";
     constexpr const char* k_WithCandidate = "0:local,1:candidate,2:empty,3:empty";
     constexpr const char* k_WithInconclusive = "0:local,1:inconclusive,2:empty,3:empty";
@@ -101,11 +103,11 @@ namespace FakeTransform
         std::string post_generation = k_Gen1;
 
         // the candidate's words (the M6-D1b shape) and the hero's
-        Words12 world = WorldOf(0.f, 0.f, -1.539356f);
-        Words7 local = LocalOf(0.f, 0.f, -1.539356f);
+        Words12 world = WorldOf(-40.99882f, -24.293657f, 0.4925565f);
+        Words7 local = LocalOf(-40.99882f, -24.293657f, 0.4925565f);
         std::string parent = k_Brick;
-        Words12 hero_world = WorldOf(-83.74377f, 14.69725f, -1.522178f);
-        Words7 hero_local = LocalOf(-83.74377f, 14.69725f, -1.522178f);
+        Words12 hero_world = WorldOf(-0.035f, -3.832f, -0.413f);
+        Words7 hero_local = LocalOf(-0.035f, -3.832f, -0.413f);
         std::string hero_parent = k_HeroParent;
 
         Mode mode = Mode::ChangeToTarget;
@@ -136,7 +138,7 @@ namespace FakeTransform
             if (world.hero_readable)
             {
                 s_Reads.hero_entity_id = Field<std::string>::Observed(k_HeroId);
-                s_Reads.hero_flags = Field<int64_t>::Observed(3);
+                s_Reads.hero_flags = Field<int64_t>::Observed(7);
                 s_Reads.hero.world = Field<Words12>::Observed(world.hero_world);
                 s_Reads.hero.local = Field<Words7>::Observed(world.hero_local);
                 s_Reads.hero.dirty = Field<bool>::Observed(false);
@@ -320,11 +322,11 @@ namespace FakeTransform
                     break;
                 case Mode::ControlChanges:
                     world.world = p_World;
-                    world.hero_world = WorldOf(-83.0f, 14.69725f, -1.522178f);
+                    world.hero_world = WorldOf(-1.0f, -3.832f, -0.413f);
                     break;
                 case Mode::ControlDrifts:
                     world.world = p_World;
-                    world.hero_world.w[10] = FloatWords::ToWord(14.69725f + 1.0e-5f);
+                    world.hero_world.w[10] = FloatWords::ToWord(-3.832f + 1.0e-5f);
                     break;
                 default:
                     world.world = p_World;

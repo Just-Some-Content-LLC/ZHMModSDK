@@ -34,8 +34,8 @@ namespace
     constexpr const char* k_Gen2 = FakeTransform::k_Gen2;
     constexpr const char* k_Original = "9c8f3a75-7054-457c-919d-ee87e77f57d9";
 
-    const Words12 k_PreWorld = FakeTransform::WorldOf(0.f, 0.f, -1.539356f);
-    const Words7 k_PreLocal = FakeTransform::LocalOf(0.f, 0.f, -1.539356f);
+    const Words12 k_PreWorld = FakeTransform::WorldOf(-40.99882f, -24.293657f, 0.4925565f); // the FAKE world's candidate
+    const Words7 k_PreLocal = FakeTransform::LocalOf(-40.99882f, -24.293657f, 0.4925565f);
     const Words12 k_Target = TransformObservation::LiftTarget(k_PreWorld);
 
     Command Lift(const std::string& p_Id, Words12 p_ExpectWorld = k_PreWorld, Words7 p_ExpectLocal = k_PreLocal, std::string p_Parent = TransformObservation::k_Brick, std::optional<std::string> p_Expected = k_Gen1)
@@ -223,7 +223,7 @@ void RunTransformApplyTests()
         CHECK(TextField(s_Run.result, "mode") == "lift");
         CHECK(TextField(s_Run.result, "preimage_world_words") == FloatWords::Encode(k_PreWorld) && TextField(s_Run.result, "preimage_local_words") == FloatWords::Encode(k_PreLocal));
         CHECK(TextField(s_Run.result, "preimage_parent") == TransformObservation::k_Brick && BoolField(s_Run.result, "preimage_dirty", false));
-        CHECK(TextField(s_Run.result, "preimage_world") == "0,0,-1.539356" && TextField(s_Run.result, "requested_world") == "0,0,-1.289356");
+        CHECK(TextField(s_Run.result, "preimage_world") == "-40.99882,-24.29366,0.4925565" && TextField(s_Run.result, "requested_world") == "-40.99882,-24.29366,0.7425565");
         CHECK(TextField(s_Run.result, "requested_world_words") == FloatWords::Encode(k_Target));
         CHECK(TextField(s_Run.result, "postimage_world_words") == FloatWords::Encode(k_Target) && TextField(s_Run.result, "postimage_local_words") == FloatWords::Encode(k_PreLocal));
         CHECK(BoolField(s_Run.result, "postimage_dirty", false) && BoolField(s_Run.result, "post_same_entity", true));
@@ -294,7 +294,7 @@ void RunTransformApplyTests()
             {"registry unreadable", "registry_unreadable", true, [](TransformApply::Context&, CommandQueue::Pending&, FakeTransform::Applier& a, Ledger&) { a.world.registry_readable = false; }},
             {"hero control unreadable", "hero_control_unavailable", true, [](TransformApply::Context&, CommandQueue::Pending&, FakeTransform::Applier& a, Ledger&) { a.world.hero_readable = false; }},
             {"dirty preimage", "preimage_dirty", false, [](TransformApply::Context&, CommandQueue::Pending&, FakeTransform::Applier& a, Ledger&) { a.world.dirty = true; }},
-            {"expect world twin bits", "expect_world_mismatch", false, [](TransformApply::Context&, CommandQueue::Pending& p, FakeTransform::Applier&, Ledger&) { p.command.transform->expect_world.w[11] = 0xbfc5099fu; }},
+            {"expect world twin bits", "expect_world_mismatch", false, [](TransformApply::Context&, CommandQueue::Pending& p, FakeTransform::Applier&, Ledger&) { p.command.transform->expect_world.w[11] = 0x3efc305fu; }},
             {"expect local mismatch", "expect_local_mismatch", false, [](TransformApply::Context&, CommandQueue::Pending& p, FakeTransform::Applier&, Ledger&) { p.command.transform->expect_local.w[6] = FloatWords::ToWord(0.9999999f); }},
             {"expect parent mismatch", "expect_parent_mismatch", false, [](TransformApply::Context&, CommandQueue::Pending& p, FakeTransform::Applier&, Ledger&) { p.command.transform->expect_parent = "none"; }},
             {"target equals current (huge z)", "target_equals_current", false, [](TransformApply::Context&, CommandQueue::Pending& p, FakeTransform::Applier& a, Ledger&) { a.world.world = FakeTransform::WorldOf(0.f, 0.f, 3.0e8f); p.command.transform->expect_world = a.world.world; }},
@@ -523,7 +523,7 @@ void RunTransformApplyTests()
             const auto s_Run = LiftOnce(s_Applier, s_Ledger, CommandTest::Uuid(29));
             RelayLog::SetRawWriterForTests(s_Previous);
             CHECK(s_Run.result.status == Status::Applied && g_InvokesAtLastWrite == 0 && s_Applier.invokes == 1);
-            CHECK(Contains(g_LogLines.back(), "candidate feede715906f747f in 007c57a6ea581f8c") && Contains(g_LogLines.back(), "dirty 0"));
+            CHECK(Contains(g_LogLines.back(), "candidate feede715906f747f in 007c57a6ea581f8c") && Contains(g_LogLines.back(), "dirty 0") && Contains(g_LogLines.back(), "3efc305e") && Contains(g_LogLines.back(), "3f3e182f"));
         }
     }
 
