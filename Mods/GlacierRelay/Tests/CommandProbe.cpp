@@ -569,7 +569,9 @@ namespace
 
         void SyncFrame()
         {
-            inner.world.hero_readable = world && world->hero_present && !hero_unavailable;
+            // the local hero exists at the menu too (experiment 4, F5; the other FAKE inspectors script it so): only the
+            // scripted hero-unavailable mode removes it
+            inner.world.hero_readable = world && !hero_unavailable;
             inner.world.fresh_generation = world ? world->registry_generation : "";
             inner.world.fresh_unavailable = !world || world->registry_generation.empty();
             if (inner.world.mode != FakeTransform::Mode::PostGenerationChange || inner.invokes == 0)
