@@ -64,13 +64,16 @@
 // distinct, in no slot, clean, at the M6-D1b shape; absent at the menu), "absent", "local-hero-alias",
 // "wrong-brick-owner", "index-invalid", "in-registry", "inconclusive-slot", "dirty-preimage",
 // "no-spatial", "no-hitman5", "hero-unavailable", "registry-unavailable", "twin-bits" (the candidate's
-// z carries the seven-digit twin of the M6-D1b value: the expectation must differ bit for bit).
+// z carries the seven-digit twin of the M6-D1b value: the expectation must differ bit for bit),
+// "at-p" (M6-G1: the candidate's and the local hero's exact words as M6-E3's r3 read them — the
+// candidate at P, c2b2fae1 416d47ae bfc2d6ba with identity axes and the signed-zero parent-relative
+// quaternion 80000000 00000000 80000000 3f800000; scripted copies, never a live read).
 // transform-apply-mode (M6-F, effectful only): "ok" (the fake setter stores the twelve requested
 // words), "unchanged", "elsewhere", "axes-elsewhere", "local-follows", "dirty-post", "readback-missing",
 // "post-generation", "post-parent", "post-entity", "fault", "control-changes", "control-drifts",
 // "exit-after-call" (as the outfit mode of that name); the log-* apply modes above also script the
-// FIRST "applying candidate.transform.set/1" line. transform-later (M6-F): what the first inspection
-// AFTER a fake lift shows — "held" (default), "returned", "near", "drifted", "dirty". Every value is
+// FIRST "applying candidate.transform.set/<1|2>" line. transform-later (M6-F): what the first inspection
+// AFTER a fake forward (a v1 lift or a v2 step_y) shows — "held" (default), "returned", "near", "drifted", "dirty". Every value is
 // scripted and is never an observation of HITMAN; no engine, no SDK function.
 // Exit code 0 when the link connected and was welcomed at least once.
 
@@ -639,7 +642,7 @@ namespace
     RelayLog::RawWrite ScriptedRawWrite(const char* p_Data, uint32_t p_Size)
     {
         const std::string_view s_Line(p_Data, p_Size);
-        const bool s_Applying = s_Line.find("applying player.outfit.set/2") != std::string_view::npos || s_Line.find("applying candidate.transform.set/1") != std::string_view::npos;
+        const bool s_Applying = s_Line.find("applying player.outfit.set/2") != std::string_view::npos || s_Line.find("applying candidate.transform.set/") != std::string_view::npos; // M6-G1: /1 and /2
         if (!s_Applying || g_ApplyingLinesSeen++ != 0 || g_LogMode == LogMode::None)
         {
             if (s_Applying)
@@ -696,7 +699,7 @@ int main(int p_Argc, char** p_Argv)
 {
     if (p_Argc < 4)
     {
-        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short] [default|registry-unavailable|layout-unsupported|extra-slot|hero-missing|candidate-present|roundtrip-different|roundtrip-unrepresentable|factory-mismatch|subentity-missing|bricks-empty|bricks-oversized|dirty-transform|invalid-flags|index-at-count|index-beyond-count|count-negative|count-zero|bricks-at-bound|bricks-oversized-candidate|texts-maximal|texts-maximal-candidate|texts-escaped|reasons-maximal] [candidate-mode: default|candidate-present|candidate-incomplete|candidate-in-slot|candidate-in-slot-nohero|spawn-other|spawn-missing|entity-missing|hero-interface-missing|parent-none|parent-unavailable|dirty-transform|hidden|active-unavailable|active-getter|registry-unavailable|count-invalid|index-at-count|bricks-oversized|texts-maximal|reasons-maximal|scene-unavailable] [transform-mode: present|absent|local-hero-alias|wrong-brick-owner|index-invalid|in-registry|inconclusive-slot|dirty-preimage|no-spatial|no-hitman5|hero-unavailable|registry-unavailable|twin-bits] [transform-apply-mode: ok|unchanged|elsewhere|axes-elsewhere|local-follows|dirty-post|readback-missing|post-generation|post-parent|post-entity|fault|control-changes|control-drifts|exit-after-call] [transform-later: held|returned|near|drifted|dirty]\n");
+        std::printf("usage: GlacierRelayCommandProbe <port> <frame_interval_ms> <duration_ms> [menu|mission|unavailable|restart|no-contract-start|contract-ended|registry-ahead] [inert|effectful] [ok|unchanged|elsewhere|fault|readback-missing|post-generation|setter-unavailable|exit-after-call|log-unavailable|log-failed|log-short] [default|registry-unavailable|layout-unsupported|extra-slot|hero-missing|candidate-present|roundtrip-different|roundtrip-unrepresentable|factory-mismatch|subentity-missing|bricks-empty|bricks-oversized|dirty-transform|invalid-flags|index-at-count|index-beyond-count|count-negative|count-zero|bricks-at-bound|bricks-oversized-candidate|texts-maximal|texts-maximal-candidate|texts-escaped|reasons-maximal] [candidate-mode: default|candidate-present|candidate-incomplete|candidate-in-slot|candidate-in-slot-nohero|spawn-other|spawn-missing|entity-missing|hero-interface-missing|parent-none|parent-unavailable|dirty-transform|hidden|active-unavailable|active-getter|registry-unavailable|count-invalid|index-at-count|bricks-oversized|texts-maximal|reasons-maximal|scene-unavailable] [transform-mode: present|absent|local-hero-alias|wrong-brick-owner|index-invalid|in-registry|inconclusive-slot|dirty-preimage|no-spatial|no-hitman5|hero-unavailable|registry-unavailable|twin-bits|at-p] [transform-apply-mode: ok|unchanged|elsewhere|axes-elsewhere|local-follows|dirty-post|readback-missing|post-generation|post-parent|post-entity|fault|control-changes|control-drifts|exit-after-call] [transform-later: held|returned|near|drifted|dirty]\n");
         return 2;
     }
 
@@ -766,6 +769,16 @@ int main(int p_Argc, char** p_Argv)
         else if (s_TransformMode == "hero-unavailable") s_Transform.hero_unavailable = true;
         else if (s_TransformMode == "registry-unavailable") w.registry_readable = false;
         else if (s_TransformMode == "twin-bits") { w.world.w[11] += 1; w.local.w[2] = w.world.w[11]; } // the seven-digit twin of the FAKE world's own z word
+        else if (s_TransformMode == "at-p")
+        {
+            // M6-G1: M6-E3's r3 words (scripted copies): the candidate at P and the local hero at its start.
+            std::string s_Why;
+            const bool s_Ok = FloatWords::Decode("3f800000,00000000,00000000,00000000,3f800000,00000000,00000000,00000000,3f800000,c2b2fae1,416d47ae,bfc2d6ba", w.world, s_Why)
+                && FloatWords::Decode("c2b2fae1,416d47ae,bfc2d6ba,80000000,00000000,80000000,3f800000", w.local, s_Why)
+                && FloatWords::Decode("3e2b7674,bf7c62bd,00000000,3f7c62bd,3e2b7674,00000000,00000000,00000000,3f800000,c2a77ccf,416b27e8,bfc2d6ba", w.hero_world, s_Why)
+                && FloatWords::Decode("c2a77ccf,416b27e8,bfc2d6ba,80000000,00000000,3f252b92,3f43969f", w.hero_local, s_Why);
+            std::printf("command probe: transform-mode at-p: the M6-E3 r3 words %s%s\n", s_Ok ? "loaded" : "NOT loaded: ", s_Why.c_str());
+        }
 
         using FakeTransform::Mode;
         if (s_TransformApplyMode == "unchanged") w.mode = Mode::Unchanged;
@@ -961,9 +974,9 @@ int main(int p_Argc, char** p_Argv)
     );
     const auto& s_Ledger = s_Scheduler.TransformLedger();
     std::printf(
-        "command probe: transform inspected %llu dispatched %llu called %llu changed %llu not_applied %llu uncertain %llu; ledger state %s budget %u forward %s link %llu effect %s invalidated '%s'; FAKE transform applier observes %d invokes %d readbacks %d latched %d\n",
+        "command probe: transform inspected %llu dispatched %llu called %llu changed %llu not_applied %llu uncertain %llu; ledger state %s budget %u forward %s v%u %s link %llu effect %s invalidated '%s'; FAKE transform applier observes %d invokes %d readbacks %d latched %d\n",
         s_Scheduled.transforms_inspected, s_Scheduled.transform_dispatched, s_Scheduled.transform_called, s_Scheduled.transform_changed, s_Scheduled.transform_not_applied, s_Scheduled.transform_uncertain,
-        TransformApply::StateText(s_Ledger.state), s_Ledger.forward_budget, s_Ledger.forward_id.empty() ? "-" : s_Ledger.forward_id.c_str(), s_Ledger.link_generation, OutfitApply::EffectText(s_Ledger.forward_effect), s_Ledger.invalidated_reason.c_str(),
+        TransformApply::StateText(s_Ledger.state), s_Ledger.forward_budget, s_Ledger.forward_id.empty() ? "-" : s_Ledger.forward_id.c_str(), s_Ledger.forward_version, s_Ledger.forward_version ? CommandProtocol::TransformModeText(s_Ledger.forward_mode) : "-", s_Ledger.link_generation, OutfitApply::EffectText(s_Ledger.forward_effect), s_Ledger.invalidated_reason.c_str(),
         s_Transform.inner.observes, s_Transform.inner.invokes, s_Transform.inner.readbacks, s_Transform.inner.Latched() ? 1 : 0
     );
     RelayLog::Info("command probe: transform inspected {} dispatched {} called {} changed {}; ledger {} budget {}", s_Scheduled.transforms_inspected, s_Scheduled.transform_dispatched, s_Scheduled.transform_called, s_Scheduled.transform_changed, TransformApply::StateText(s_Ledger.state), s_Ledger.forward_budget);
