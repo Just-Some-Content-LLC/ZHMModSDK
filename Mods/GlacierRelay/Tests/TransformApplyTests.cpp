@@ -58,6 +58,18 @@ namespace
         return s_Command;
     }
 
+    // M6-G1: a candidate.transform.set v2 step_y (the request carries its entry version).
+    Command Step(const std::string& p_Id, Words12 p_ExpectWorld = k_PreWorld, Words7 p_ExpectLocal = k_PreLocal, std::string p_Parent = TransformObservation::k_Brick, std::optional<std::string> p_Expected = k_Gen1)
+    {
+        Command s_Command = Lift(p_Id, p_ExpectWorld, p_ExpectLocal, std::move(p_Parent), std::move(p_Expected));
+        s_Command.version = 2;
+        s_Command.entry = Entry::CandidateTransformSet2;
+        s_Command.transform->version = 2;
+        s_Command.transform->mode = TransformMode::StepY;
+        s_Command.params[0].second = "step_y";
+        return s_Command;
+    }
+
     Command Restore(const std::string& p_Id, Words12 p_ExpectWorld, Words12 p_TargetWorld, std::string p_RestoreOf = k_Original, Words7 p_ExpectLocal = k_PreLocal, std::optional<std::string> p_Expected = k_Gen1)
     {
         Command s_Command = Lift(p_Id, p_ExpectWorld, p_ExpectLocal, TransformObservation::k_Brick, std::move(p_Expected));
@@ -66,6 +78,32 @@ namespace
         s_Command.transform->restore_of = std::move(p_RestoreOf);
         s_Command.params[0].second = "restore";
         return s_Command;
+    }
+
+    // M6-G1: a v2 restore (the request carries entry version 2).
+    Command RestoreV2(const std::string& p_Id, Words12 p_ExpectWorld, Words12 p_TargetWorld, std::string p_RestoreOf, Words7 p_ExpectLocal)
+    {
+        Command s_Command = Restore(p_Id, p_ExpectWorld, p_TargetWorld, std::move(p_RestoreOf), p_ExpectLocal);
+        s_Command.version = 2;
+        s_Command.entry = Entry::CandidateTransformSet2;
+        s_Command.transform->version = 2;
+        return s_Command;
+    }
+
+    Words12 W12(const char* p_Text)
+    {
+        Words12 s_Words;
+        std::string s_Why;
+        CHECK(FloatWords::Decode(p_Text, s_Words, s_Why));
+        return s_Words;
+    }
+
+    Words7 W7(const char* p_Text)
+    {
+        Words7 s_Words;
+        std::string s_Why;
+        CHECK(FloatWords::Decode(p_Text, s_Words, s_Why));
+        return s_Words;
     }
 
     CommandQueue::Pending Pending(const Command& p_Command, const char* p_ReceiptGen = k_Gen1, uint64_t p_ReceiptEpoch = 1)
@@ -312,18 +350,23 @@ void RunTransformApplyTests()
             {"observe faults", "effectful_latched", true, [](TransformApply::Context&, CommandQueue::Pending&, FakeTransform::Applier& a, Ledger&) { a.world.mode = Mode::ObserveFaults; }},
         };
 
+        // M6-G1: the same table for the v1 lift and the v2 step_y (one gate); the z-specific no-op
+        // case is the lift's alone (the step's own no-op and non-finite cases are below).
+        for (const uint32_t s_Version : {1u, 2u})
         for (const auto& s_Case : s_Cases)
         {
+            if (s_Version == 2 && std::string(s_Case.label) == "target equals current (huge z)")
+                continue;
             FakeTransform::Applier s_Applier;
             Ledger s_Ledger;
-            auto s_Pending = Pending(Lift(CommandTest::Uuid(20)));
+            auto s_Pending = Pending(s_Version == 1 ? Lift(CommandTest::Uuid(20)) : Step(CommandTest::Uuid(20)));
             auto s_Context = PlayingContext(s_Pending);
             s_Case.arrange(s_Context, s_Pending, s_Applier, s_Ledger);
             const auto s_Run = Apply(s_Context, s_Applier, s_Ledger);
             const bool s_Status = s_Run.result.status == (s_Case.unavailable ? Status::Unavailable : Status::PreconditionFailed);
             const bool s_Reason = Contains(s_Run.result.reason, s_Case.reason) && Contains(TextField(s_Run.result, "precondition_reasons"), s_Case.reason);
             if (!s_Status || !s_Reason || s_Applier.invokes != 0)
-                std::printf("  transform refusal '%s': status %s reason '%s' invokes %d\n", s_Case.label, StatusText(s_Run.result.status), s_Run.result.reason.c_str(), s_Applier.invokes);
+                std::printf("  transform v%u refusal '%s': status %s reason '%s' invokes %d\n", s_Version, s_Case.label, StatusText(s_Run.result.status), s_Run.result.reason.c_str(), s_Applier.invokes);
             CHECK(s_Status && s_Reason);
             CHECK(s_Applier.invokes == 0 && s_Run.outcome.invocation == Invocation::NotCalled && s_Run.outcome.effect == Effect::None);
             CHECK(!BoolField(s_Run.result, "setter_called", true) && BoolField(s_Run.result, "precondition_ok", false) && TextField(s_Run.result, "apply_log") == "not_attempted");
@@ -602,5 +645,273 @@ void RunTransformApplyTests()
         s_Late.ttl_ms = k_MinTtlMs;
         CHECK(s_Queue.Push(s_Late, 1, 4000).outcome == CommandQueue::PushOutcome::Queued);
         CHECK(s_Scheduler.Tick(s_Frame) && s_Emitted.size() == 4 && s_Emitted[3].status == Status::Expired && s_Applier.invokes == 1);
+    }
+    // ===== M6-G1: candidate.transform.set v2 step_y over the same gate, applier and ledger ==========
+    const Words12 k_E3World = W12("3f800000,00000000,00000000,00000000,3f800000,00000000,00000000,00000000,3f800000,c2b2fae1,416d47ae,bfc2d6ba");
+    const Words7 k_E3Local = W7("c2b2fae1,416d47ae,bfc2d6ba,80000000,00000000,80000000,3f800000");
+    const Words12 k_StepTarget = TransformObservation::StepYTarget(k_E3World);
+    auto AtP = [&](FakeTransform::Applier& p_Applier) { p_Applier.world.world = k_E3World; p_Applier.world.local = k_E3Local; };
+    const std::string k_StepId = "5b1f0c2e-8d4a-4f6b-9a3c-2e7d1f0a9b84";
+
+    // --- the qualified step on M6-E3's words; the shared budget; a v1 restore refused; the v2 restore ---
+    {
+        FakeTransform::Applier s_Applier;
+        AtP(s_Applier);
+        Ledger s_Ledger;
+        ResetLogScript(&s_Applier);
+        const auto s_Previous = RelayLog::SetRawWriterForTests(&ScriptedRawWrite);
+        const auto s_Run = Apply(PlayingContext(Pending(Step(k_StepId, k_E3World, k_E3Local))), s_Applier, s_Ledger);
+        RelayLog::SetRawWriterForTests(s_Previous);
+        CHECK(s_Run.result.status == Status::Applied && s_Run.outcome.invocation == Invocation::Called && s_Run.outcome.effect == Effect::Changed);
+        CHECK(s_Applier.invokes == 1 && s_Applier.last_target == k_StepTarget);
+        for (size_t i = 0; i < 12; ++i)
+            CHECK(i == 10 ? s_Applier.last_target.w[i] == 0x417147aeu : s_Applier.last_target.w[i] == k_E3World.w[i]);
+        CHECK(TextField(s_Run.result, "mode") == "step_y" && TextField(s_Run.result, "requested_world_words") == FloatWords::Encode(k_StepTarget));
+        CHECK(TextField(s_Run.result, "preimage_world_words") == FloatWords::Encode(k_E3World) && TextField(s_Run.result, "preimage_local_words") == FloatWords::Encode(k_E3Local));
+        CHECK(TextField(s_Run.result, "requested_world") == "-89.49,15.08,-1.522178");
+        CHECK(TextField(s_Run.result, "world_match") == "target" && TextField(s_Run.result, "local_match") == "unchanged" && TextField(s_Run.result, "hero_control") == "unchanged");
+        CHECK(IntField(s_Run.result, "budget_remaining") == 0 && TextField(s_Run.result, "apply_log") == "written" && BoolField(s_Run.result, "setter_called", true));
+        CHECK(s_Run.result.observed.size() == 47 && EncodeResult(s_Run.result).size() <= k_MaxLineBytes && !s_Run.outcome.reduced);
+        std::printf("line bound: candidate.transform.set/2 step_y result = %zu bytes of %zu (%zu entries)\n", EncodeResult(s_Run.result).size(), k_MaxLineBytes, s_Run.result.observed.size());
+        CHECK(!g_LogLines.empty() && Contains(g_LogLines.back(), "applying candidate.transform.set/2 mode step_y") && Contains(g_LogLines.back(), FloatWords::Encode(k_E3World)) && Contains(g_LogLines.back(), FloatWords::Encode(k_StepTarget)));
+        CHECK(g_InvokesAtLastWrite == 0); // the accepted line precedes the call
+        CHECK(s_Ledger.state == Ledger::State::ForwardInvoked && s_Ledger.forward_budget == 0 && s_Ledger.forward_id == k_StepId);
+        CHECK(s_Ledger.forward_version == 2 && s_Ledger.forward_mode == TransformMode::StepY && s_Ledger.preimage_world == k_E3World && s_Ledger.requested_world == k_StepTarget && s_Ledger.postimage_world == k_StepTarget);
+
+        // One shared budget: a v1 lift after the step, and a second step, are refused; nothing invoked.
+        const auto s_LiftAfter = Apply(PlayingContext(Pending(Lift(CommandTest::Uuid(60), k_StepTarget, k_E3Local))), s_Applier, s_Ledger);
+        CHECK(s_LiftAfter.result.status == Status::PreconditionFailed && Contains(s_LiftAfter.result.reason, "budget_exhausted") && s_Applier.invokes == 1);
+        const auto s_StepAgain = Apply(PlayingContext(Pending(Step(CommandTest::Uuid(61), k_StepTarget, k_E3Local))), s_Applier, s_Ledger);
+        CHECK(s_StepAgain.result.status == Status::PreconditionFailed && Contains(s_StepAgain.result.reason, "budget_exhausted") && s_Applier.invokes == 1);
+
+        // A v1 restore of the v2 step: refused natively (restore_version_mismatch); nothing invoked.
+        const auto s_CrossRestore = Apply(PlayingContext(Pending(Restore(CommandTest::Uuid(62), k_StepTarget, k_E3World, k_StepId, k_E3Local))), s_Applier, s_Ledger);
+        CHECK(s_CrossRestore.result.status == Status::PreconditionFailed && Contains(s_CrossRestore.result.reason, "restore_version_mismatch") && s_Applier.invokes == 1);
+        CHECK(s_Ledger.state == Ledger::State::ForwardInvoked);
+
+        // The v2 restore bound to the record: invoked once more, back to M6-E3's words exactly.
+        const auto s_Back = Apply(PlayingContext(Pending(RestoreV2(CommandTest::Uuid(63), k_StepTarget, k_E3World, k_StepId, k_E3Local))), s_Applier, s_Ledger);
+        CHECK(s_Back.result.status == Status::Applied && s_Back.outcome.effect == Effect::Changed && s_Applier.invokes == 2 && s_Applier.last_target == k_E3World);
+        CHECK(TextField(s_Back.result, "mode") == "restore" && TextField(s_Back.result, "restore_of") == k_StepId);
+        CHECK(TextField(s_Back.result, "restore_facts") == "world=1,local=1,parent=1,dirty=1,snapshot=1,within_tol=1" && s_Ledger.state == Ledger::State::Restored);
+
+        // A restoration never refills the budget: a further step and a further lift are refused.
+        const auto s_StepAfterRestore = Apply(PlayingContext(Pending(Step(CommandTest::Uuid(64), k_E3World, k_E3Local))), s_Applier, s_Ledger);
+        CHECK(s_StepAfterRestore.result.status == Status::PreconditionFailed && Contains(s_StepAfterRestore.result.reason, "budget_exhausted") && s_Applier.invokes == 2);
+        const auto s_LiftAfterRestore = Apply(PlayingContext(Pending(Lift(CommandTest::Uuid(65), k_E3World, k_E3Local))), s_Applier, s_Ledger);
+        CHECK(s_LiftAfterRestore.result.status == Status::PreconditionFailed && Contains(s_LiftAfterRestore.result.reason, "budget_exhausted") && s_Applier.invokes == 2);
+        const auto s_SecondRestore = Apply(PlayingContext(Pending(RestoreV2(CommandTest::Uuid(66), k_E3World, k_StepTarget, k_StepId, k_E3Local))), s_Applier, s_Ledger);
+        CHECK(s_SecondRestore.result.status == Status::PreconditionFailed && Contains(s_SecondRestore.result.reason, "already_restored") && s_Applier.invokes == 2);
+    }
+
+    // --- the other order: a v1 lift first; a v2 step refused (shared budget); a v2 restore of the lift refused ---
+    {
+        FakeTransform::Applier s_Applier;
+        Ledger s_Ledger;
+        const auto s_Lifted = LiftOnce(s_Applier, s_Ledger);
+        CHECK(s_Lifted.outcome.effect == Effect::Changed && s_Ledger.forward_version == 1 && s_Ledger.forward_mode == TransformMode::Lift);
+        const auto s_StepAfter = Apply(PlayingContext(Pending(Step(CommandTest::Uuid(67), k_Target))), s_Applier, s_Ledger);
+        CHECK(s_StepAfter.result.status == Status::PreconditionFailed && Contains(s_StepAfter.result.reason, "budget_exhausted") && s_Applier.invokes == 1);
+        const auto s_CrossRestore = Apply(PlayingContext(Pending(RestoreV2(CommandTest::Uuid(68), k_Target, k_PreWorld, k_Original, k_PreLocal))), s_Applier, s_Ledger);
+        CHECK(s_CrossRestore.result.status == Status::PreconditionFailed && Contains(s_CrossRestore.result.reason, "restore_version_mismatch") && s_Applier.invokes == 1);
+        // the v1 restore of the v1 lift still works exactly as before
+        const auto s_Back = Apply(PlayingContext(Pending(Restore(CommandTest::Uuid(69), k_Target, k_PreWorld))), s_Applier, s_Ledger);
+        CHECK(s_Back.result.status == Status::Applied && s_Back.outcome.effect == Effect::Changed && s_Applier.invokes == 2 && s_Ledger.state == Ledger::State::Restored);
+    }
+
+    // --- unsupported (version, mode) pairs reached natively (BEAM and the decoder refuse them first) ---
+    {
+        struct Pair { uint32_t version; TransformMode mode; };
+        const Pair s_Pairs[] = {{1, TransformMode::StepY}, {2, TransformMode::Lift}, {3, TransformMode::StepY}, {0, TransformMode::Lift}};
+        for (const auto& s_Pair : s_Pairs)
+        {
+            FakeTransform::Applier s_Applier;
+            Ledger s_Ledger;
+            Command s_Command = Lift(CommandTest::Uuid(70));
+            s_Command.transform->version = s_Pair.version;
+            s_Command.transform->mode = s_Pair.mode;
+            const auto s_Run = Apply(PlayingContext(Pending(s_Command)), s_Applier, s_Ledger);
+            const bool s_Ok = s_Run.result.status == Status::PreconditionFailed && Contains(s_Run.result.reason, "entry_mode_unsupported") && s_Applier.invokes == 0;
+            if (!s_Ok)
+                std::printf("  unsupported pair v%u %s: status %s reason '%s' invokes %d\n", s_Pair.version, TransformModeText(s_Pair.mode), StatusText(s_Run.result.status), s_Run.result.reason.c_str(), s_Applier.invokes);
+            CHECK(s_Ok);
+            CHECK(s_Ledger.forward_budget == 1 && s_Ledger.state == Ledger::State::None && FieldIs(s_Run.result, "requested_world_words", FieldStatus::Unavailable));
+        }
+        // the request's version disagreeing with the decoded command's entry version: refused, nothing invoked
+        {
+            FakeTransform::Applier s_Applier;
+            Ledger s_Ledger;
+            Command s_Mixed = Step(CommandTest::Uuid(79));
+            s_Mixed.version = 1; // the command says v1, the request says v2 step_y
+            const auto s_Run = Apply(PlayingContext(Pending(s_Mixed)), s_Applier, s_Ledger);
+            CHECK(s_Run.result.status == Status::PreconditionFailed && Contains(s_Run.result.reason, "entry_mode_unsupported") && s_Applier.invokes == 0 && s_Ledger.forward_budget == 1);
+        }
+        // a restore whose request names another version than the decoded one never reaches the record either
+        FakeTransform::Applier s_Applier;
+        Ledger s_Ledger;
+        LiftOnce(s_Applier, s_Ledger);
+        Command s_Restore = Restore(CommandTest::Uuid(71), k_Target, k_PreWorld);
+        s_Restore.transform->version = 3;
+        const auto s_Run = Apply(PlayingContext(Pending(s_Restore)), s_Applier, s_Ledger);
+        CHECK(s_Run.result.status == Status::PreconditionFailed && Contains(s_Run.result.reason, "entry_mode_unsupported") && Contains(s_Run.result.reason, "restore_version_mismatch") && s_Applier.invokes == 1);
+    }
+
+    // --- the checked applying line for /2: no call on an unaccepted line; the budget is not consumed ---
+    {
+        struct Case { const char* label; bool file_open; bool succeeded; uint32_t short_by; uint32_t error; const char* status; };
+        const Case s_Cases[] = {
+            {"file unavailable", false, false, 0, 3, "file_unavailable"},
+            {"write failed", true, false, 0, 29, "write_failed"},
+            {"short write", true, true, 7, 0, "short_write"},
+        };
+        for (const auto& s_Case : s_Cases)
+        {
+            FakeTransform::Applier s_Applier;
+            AtP(s_Applier);
+            Ledger s_Ledger;
+            ResetLogScript(&s_Applier);
+            g_LogScript.file_open = s_Case.file_open;
+            g_LogScript.succeeded = s_Case.succeeded;
+            g_LogScript.short_by = s_Case.short_by;
+            g_LogScript.error = s_Case.error;
+            const auto s_Previous = RelayLog::SetRawWriterForTests(&ScriptedRawWrite);
+            const auto s_Run = Apply(PlayingContext(Pending(Step(CommandTest::Uuid(72), k_E3World, k_E3Local))), s_Applier, s_Ledger);
+            RelayLog::SetRawWriterForTests(s_Previous);
+            CHECK(s_Run.result.status == Status::Unavailable && Contains(s_Run.result.reason, "apply_log_unwritten") && Contains(s_Run.result.reason, s_Case.status) && s_Applier.invokes == 0);
+            CHECK(g_LogWrites >= 1 && Contains(g_LogLines.back(), "applying candidate.transform.set/2 mode step_y"));
+            CHECK(s_Ledger.forward_budget == 1 && s_Ledger.state == Ledger::State::None);
+            const auto s_Retry = Apply(PlayingContext(Pending(Step(CommandTest::Uuid(73), k_E3World, k_E3Local))), s_Applier, s_Ledger);
+            CHECK(s_Retry.result.status == Status::Applied && s_Retry.outcome.effect == Effect::Changed && s_Applier.invokes == 1 && s_Ledger.forward_budget == 0);
+        }
+    }
+
+    // --- the step's other setter outcomes: the same classes as the lift's ------------------------
+    {
+        struct Case { Mode mode; Status status; Effect effect; const char* world_match; const char* local_match; const char* control; };
+        const Case s_Cases[] = {
+            {Mode::Unchanged, Status::Applied, Effect::Unchanged, "preimage", "unchanged", "unchanged"},
+            {Mode::Elsewhere, Status::Applied, Effect::Uncertain, "neither", "unchanged", "unchanged"},
+            {Mode::AxesElsewhere, Status::Applied, Effect::Uncertain, "neither", "unchanged", "unchanged"},
+            {Mode::LocalFollows, Status::Applied, Effect::Changed, "target", "changed", "unchanged"},
+            {Mode::DirtyPost, Status::Applied, Effect::Uncertain, "indeterminate_dirty", "unchanged", "unchanged"},
+            {Mode::ReadBackUnavailable, Status::Applied, Effect::Uncertain, "unavailable", "unavailable", "unchanged"},
+            {Mode::PostGenerationChange, Status::Applied, Effect::Uncertain, "target", "unchanged", "unchanged"},
+            {Mode::PostParentChange, Status::Applied, Effect::Uncertain, "target", "unchanged", "unchanged"},
+            {Mode::PostEntityChange, Status::Applied, Effect::Uncertain, "target", "unchanged", "unchanged"},
+            {Mode::FaultDuringCall, Status::Failed, Effect::Uncertain, "preimage", "unchanged", "unchanged"},
+            {Mode::ControlChanges, Status::Applied, Effect::Changed, "target", "unchanged", "changed"},
+        };
+        for (const auto& s_Case : s_Cases)
+        {
+            FakeTransform::Applier s_Applier;
+            AtP(s_Applier);
+            s_Applier.world.mode = s_Case.mode;
+            Ledger s_Ledger;
+            const auto s_Run = Apply(PlayingContext(Pending(Step(CommandTest::Uuid(74), k_E3World, k_E3Local))), s_Applier, s_Ledger);
+            const bool s_Ok = s_Run.result.status == s_Case.status && s_Run.outcome.effect == s_Case.effect && TextField(s_Run.result, "world_match") == s_Case.world_match
+                && TextField(s_Run.result, "local_match") == s_Case.local_match && TextField(s_Run.result, "hero_control") == s_Case.control;
+            if (!s_Ok)
+                std::printf("  step mode %d: status %s effect %s world_match %s local_match %s control %s reason '%s'\n", static_cast<int>(s_Case.mode), StatusText(s_Run.result.status), OutfitApply::EffectText(s_Run.outcome.effect), TextField(s_Run.result, "world_match").c_str(), TextField(s_Run.result, "local_match").c_str(), TextField(s_Run.result, "hero_control").c_str(), s_Run.result.reason.c_str());
+            CHECK(s_Ok && s_Applier.invokes == 1 && IntField(s_Run.result, "budget_remaining") == 0);
+            const bool s_Restorable = s_Case.effect == Effect::Changed && std::string(s_Case.control) == "unchanged";
+            CHECK((s_Ledger.state == Ledger::State::ForwardInvoked) == s_Restorable && s_Ledger.forward_version == 2);
+            if (s_Case.mode == Mode::LocalFollows)
+                CHECK(s_Applier.world.local.w[1] == 0x417147aeu && s_Applier.world.local.w[3] == 0x80000000u && s_Applier.world.local.w[5] == 0x80000000u); // y followed; the signed zeros kept
+        }
+    }
+
+    // --- the step's own no-op and non-finite targets: refused by the existing rules -------------
+    {
+        FakeTransform::Applier s_Applier;
+        s_Applier.world.world = FakeTransform::WorldOf(0.f, 3.0e8f, -1.522178f);
+        Ledger s_Ledger;
+        const auto s_Run = Apply(PlayingContext(Pending(Step(CommandTest::Uuid(75), s_Applier.world.world))), s_Applier, s_Ledger);
+        CHECK(s_Run.result.status == Status::PreconditionFailed && Contains(s_Run.result.reason, "target_equals_current") && s_Applier.invokes == 0 && s_Ledger.forward_budget == 1);
+        FakeTransform::Applier s_Inf;
+        s_Inf.world.world.w[10] = 0x7f800000u;
+        Ledger s_InfLedger;
+        const auto s_InfRun = Apply(PlayingContext(Pending(Step(CommandTest::Uuid(76), s_Inf.world.world))), s_Inf, s_InfLedger);
+        CHECK(s_InfRun.result.status == Status::PreconditionFailed && Contains(s_InfRun.result.reason, "target_not_finite") && s_Inf.invokes == 0 && s_InfLedger.forward_budget == 1);
+    }
+
+    // --- the v2 restore's bindings: every substitution refused against the record ----------------
+    {
+        struct Case { const char* label; const char* reason; void (*arrange)(CommandQueue::Pending&, FakeTransform::Applier&, Ledger&); };
+        const Case s_Cases[] = {
+            {"wrong original id", "operation_record_mismatch", [](CommandQueue::Pending& p, FakeTransform::Applier&, Ledger&) { p.command.transform->restore_of = CommandTest::Uuid(77); }},
+            {"substituted matrix", "restore_target_mismatch", [](CommandQueue::Pending& p, FakeTransform::Applier&, Ledger&) { p.command.transform->target_world = FakeTransform::WorldOf(0.f, 0.f, -2.f); }},
+            {"state drifted since the step", "current_not_postimage", [](CommandQueue::Pending& p, FakeTransform::Applier& a, Ledger&) { a.world.world.w[10] = FloatWords::ToWord(FloatWords::ToFloat(a.world.world.w[10]) + 0.5f); p.command.transform->expect_world = a.world.world; }},
+            {"lost record (new process)", "operation_record_missing", [](CommandQueue::Pending&, FakeTransform::Applier&, Ledger& l) { l = Ledger{}; }},
+        };
+        for (const auto& s_Case : s_Cases)
+        {
+            FakeTransform::Applier s_Applier;
+            AtP(s_Applier);
+            Ledger s_Ledger;
+            const auto s_Stepped = Apply(PlayingContext(Pending(Step(k_StepId, k_E3World, k_E3Local))), s_Applier, s_Ledger);
+            CHECK(s_Stepped.outcome.effect == Effect::Changed);
+            auto s_Pending = Pending(RestoreV2(CommandTest::Uuid(78), k_StepTarget, k_E3World, k_StepId, k_E3Local));
+            s_Case.arrange(s_Pending, s_Applier, s_Ledger);
+            const auto s_Run = Apply(PlayingContext(s_Pending), s_Applier, s_Ledger);
+            const bool s_Ok = s_Run.result.status == Status::PreconditionFailed && Contains(s_Run.result.reason, s_Case.reason) && s_Applier.invokes == 1;
+            if (!s_Ok)
+                std::printf("  v2 restore refusal '%s': status %s reason '%s' invokes %d\n", s_Case.label, StatusText(s_Run.result.status), s_Run.result.reason.c_str(), s_Applier.invokes);
+            CHECK(s_Ok);
+        }
+    }
+
+    // --- the step's mandatory result capacity; the scheduler's v2 dispatch and the shared budget ---
+    {
+        FakeTransform::Applier s_Applier;
+        s_Applier.world.fresh_generation = std::string(k_MaxMissionGenerationBytes, 'g');
+        s_Applier.world.parent = "ffffffffffffffff";
+        s_Applier.world.inconclusive_slot = true;
+        const auto s_Reads = s_Applier.Current(false, s_Applier.world.fresh_generation);
+        Result s_Base;
+        s_Base.protocol_version = 2;
+        s_Base.command_id = CommandTest::Uuid(80);
+        s_Base.link_generation = UINT64_MAX;
+        s_Base.adapter_instance_id = CommandTest::Uuid(99);
+        s_Base.native_at = std::string(64, 't');
+        s_Base.frame = UINT64_MAX;
+        s_Base.mission_generation = s_Applier.world.fresh_generation;
+        TransformRequest s_Request;
+        s_Request.version = 2;
+        s_Request.mode = TransformMode::StepY;
+        CHECK(TransformApply::MandatoryResultFits(s_Base, s_Reads, s_Request, k_StepTarget));
+    }
+    {
+        CommandQueue s_Queue;
+        std::vector<Result> s_Emitted;
+        CommandScheduler s_Scheduler(s_Queue, [&](const Result& p_Result) { s_Emitted.push_back(p_Result); });
+        FakeTransform::Applier s_Applier;
+        CommandScheduler::FrameObservation s_Frame;
+        s_Frame.frame = 100;
+        s_Frame.now_mono_ms = 5000;
+        s_Frame.thread_id = GetCurrentThreadId();
+        s_Frame.link_generation = 1;
+        s_Frame.link_generation_now = [] { return uint64_t(1); };
+        s_Frame.scene_available = true;
+        s_Frame.scene.available = true;
+        s_Frame.scene.scene_resource = "r";
+        s_Frame.scene.scene_loaded = true;
+        s_Frame.scene.loading_stage = 8;
+        s_Frame.scene.scene_type = "mission";
+        s_Frame.mission_playing = true;
+        s_Frame.previous_frame_playing = true;
+        s_Frame.mission_generation = k_Gen1;
+        s_Frame.relay_transition_epoch = 1;
+        s_Frame.rise_frame = 1;
+        s_Frame.rise_mono_ms = 0;
+        s_Frame.scene_resource_same_as_rise = true;
+        s_Frame.contract_started_seen = k_Gen1;
+        CHECK(s_Queue.Push(Step(CommandTest::Uuid(81)), 1, 4900).outcome == CommandQueue::PushOutcome::Queued);
+        CHECK(s_Scheduler.Tick(s_Frame) && s_Emitted.size() == 1 && s_Emitted[0].status == Status::Rejected && Contains(s_Emitted[0].reason, "no transform applier"));
+        s_Frame.transform_applier = &s_Applier;
+        CHECK(s_Queue.Push(Step(CommandTest::Uuid(82)), 1, 4900).outcome == CommandQueue::PushOutcome::Queued);
+        CHECK(s_Scheduler.Tick(s_Frame) && s_Emitted.size() == 2 && s_Emitted[1].status == Status::Applied && TextField(s_Emitted[1], "mode") == "step_y" && TextField(s_Emitted[1], "effect") == "changed");
+        CHECK(s_Scheduler.TransformLedger().forward_version == 2 && s_Scheduler.TransformLedger().forward_id == CommandTest::Uuid(82) && s_Scheduler.GetStats().transform_called == 1);
+        CHECK(s_Queue.Push(Lift(CommandTest::Uuid(83), TransformObservation::StepYTarget(k_PreWorld)), 1, 4900).outcome == CommandQueue::PushOutcome::Queued);
+        CHECK(s_Scheduler.Tick(s_Frame) && s_Emitted.size() == 3 && s_Emitted[2].status == Status::PreconditionFailed && Contains(s_Emitted[2].reason, "budget_exhausted") && s_Applier.invokes == 1);
     }
 }

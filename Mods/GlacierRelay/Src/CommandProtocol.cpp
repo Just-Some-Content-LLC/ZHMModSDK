@@ -60,17 +60,25 @@ namespace CommandProtocol
             return Entry::RelayInspectCandidateTransform1;
         if (p_Name == "candidate.transform.set" && p_Version == 1)
             return Entry::CandidateTransformSet1;
+        if (p_Name == "candidate.transform.set" && p_Version == 2)
+            return Entry::CandidateTransformSet2; // M6-G1: the (name, version) pair is the capability identity
         return Entry::Unknown;
     }
 
     bool IsEffectful(Entry p_Entry)
     {
-        return p_Entry == Entry::PlayerOutfitSet2 || p_Entry == Entry::CandidateTransformSet1;
+        return p_Entry == Entry::PlayerOutfitSet2 || p_Entry == Entry::CandidateTransformSet1 || p_Entry == Entry::CandidateTransformSet2;
     }
 
     const char* TransformModeText(TransformMode p_Mode)
     {
-        return p_Mode == TransformMode::Restore ? "restore" : "lift";
+        switch (p_Mode)
+        {
+            case TransformMode::Lift: return "lift";
+            case TransformMode::Restore: return "restore";
+            case TransformMode::StepY: return "step_y";
+        }
+        return "unknown";
     }
 
     bool ValidHex16(std::string_view p_Text)
@@ -339,24 +347,30 @@ namespace CommandProtocol
                 break;
 
             case Entry::CandidateTransformSet1:
+            case Entry::CandidateTransformSet2:
             {
                 // M6-F (design section 12.5): the mode, the exact expectation groups and parent of a
                 // recent exact inspection, and for a restore the journaled preimage world group and
                 // the original command id; nothing else; the mandatory mission_generation
                 // precondition; a restore already at its target is refused as a no-op; and none of
                 // it unless the effectful setting is on (otherwise rejected like the reserved entry).
+                // M6-G1: the same rules for v2, whose forward is "step_y" (v1's is "lift"); the
+                // version is carried in the request so that the apply's gate pairs it again.
+                const bool s_V2 = s_Command.entry == Entry::CandidateTransformSet2;
+                const char* s_Forward = s_V2 ? "step_y" : "lift";
                 if (!p_Options.effectful)
-                    return Reject(s_Out, "effectful setting disabled: candidate.transform.set/1 not executable");
+                    return Reject(s_Out, std::string("effectful setting disabled: candidate.transform.set/") + (s_V2 ? "2" : "1") + " not executable");
 
                 if (!KnownKeys(*s_Params, {"mode", "expect_world", "expect_local", "expect_parent", "target_world", "restore_of"}, s_Unknown))
                     return Reject(s_Out, "unknown parameter: " + s_Unknown);
 
                 TransformRequest s_Request;
+                s_Request.version = s_V2 ? 2 : 1;
                 std::string s_Why;
                 const Value* s_Mode = s_Params->Find("mode");
-                if (!IsText(s_Mode, 16) || (s_Mode->text != "lift" && s_Mode->text != "restore"))
-                    return Reject(s_Out, "invalid parameter: mode (missing or not lift|restore)");
-                s_Request.mode = s_Mode->text == "restore" ? TransformMode::Restore : TransformMode::Lift;
+                if (!IsText(s_Mode, 16) || (s_Mode->text != s_Forward && s_Mode->text != "restore"))
+                    return Reject(s_Out, std::string("invalid parameter: mode (missing or not ") + s_Forward + "|restore)");
+                s_Request.mode = s_Mode->text == "restore" ? TransformMode::Restore : s_V2 ? TransformMode::StepY : TransformMode::Lift;
 
                 const Value* s_ExpectWorld = s_Params->Find("expect_world");
                 if (!IsText(s_ExpectWorld, k_MaxObservedTextBytes) || !FloatWords::Decode(s_ExpectWorld->text, s_Request.expect_world, s_Why))
@@ -374,10 +388,10 @@ namespace CommandProtocol
                 const Value* s_TargetWorld = s_Params->Find("target_world");
                 const Value* s_RestoreOf = s_Params->Find("restore_of");
 
-                if (s_Request.mode == TransformMode::Lift)
+                if (s_Request.mode != TransformMode::Restore)
                 {
                     if (s_TargetWorld || s_RestoreOf)
-                        return Reject(s_Out, "invalid parameter: a lift carries no target_world or restore_of (the displacement is compiled)");
+                        return Reject(s_Out, std::string("invalid parameter: a ") + s_Forward + " carries no target_world or restore_of (the displacement is compiled)");
                 }
                 else
                 {

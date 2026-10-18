@@ -121,6 +121,31 @@ void RunTransformObservationTests()
         CHECK(TransformObservation::LiftTarget(s_Huge) == s_Huge);
     }
 
+    // ---- M6-G1: the compiled v2 step target: only word 10 (Trans.y) changes, y + 0.25f in binary32 ----
+    {
+        // M6-E3's r3 words for the candidate at P, with a signed zero planted in an axis word (the
+        // codec and the target keep every other bit, -0 included).
+        Words12 s_Pre;
+        std::string s_Why;
+        CHECK(FloatWords::Decode("3f800000,80000000,00000000,00000000,3f800000,00000000,00000000,00000000,3f800000,c2b2fae1,416d47ae,bfc2d6ba", s_Pre, s_Why));
+        const Words12 s_Step = TransformObservation::StepYTarget(s_Pre);
+        for (size_t i = 0; i < 12; ++i)
+            if (i != 10)
+                CHECK(s_Step.w[i] == s_Pre.w[i]);
+        CHECK(s_Step.w[1] == 0x80000000u && s_Pre.w[1] == 0x80000000u); // the signed zero kept bit for bit
+        CHECK(s_Pre.w[10] == 0x416d47aeu && s_Step.w[10] == 0x417147aeu);
+        CHECK(FloatWords::ToFloat(s_Step.w[10]) - FloatWords::ToFloat(s_Pre.w[10]) == 0.25f); // the exact delta
+        CHECK(static_cast<double>(FloatWords::ToFloat(s_Step.w[10])) == static_cast<double>(FloatWords::ToFloat(s_Pre.w[10])) + 0.25);
+        CHECK(TransformObservation::k_StepY == 0.25f && s_Step != s_Pre);
+        CHECK(TransformObservation::LiftTarget(s_Pre).w[10] == s_Pre.w[10] && TransformObservation::LiftTarget(s_Pre).w[11] == 0xbfa2d6bau); // v1 unchanged: z only
+        // The non-moving and the non-finite cases (refused by the gate: target_equals_current / target_not_finite).
+        const Words12 s_HugeY = FakeTransform::WorldOf(0.f, 3.0e8f, -1.522178f);
+        CHECK(TransformObservation::StepYTarget(s_HugeY) == s_HugeY);
+        Words12 s_InfY = s_Pre;
+        s_InfY.w[10] = 0x7f800000u;
+        CHECK(!FloatWords::AllFinite(TransformObservation::StepYTarget(s_InfY)));
+    }
+
     // ---- the inspection encoding: 35 entries with the frame values; the line fits; the texts fit ----
     {
         FakeTransform::Applier s_Fake;
@@ -192,7 +217,10 @@ void RunTransformObservationTests()
     {
         CHECK(Lookup("relay.inspect.candidate_transform", 1) == Entry::RelayInspectCandidateTransform1 && !IsEffectful(Entry::RelayInspectCandidateTransform1));
         CHECK(Lookup("candidate.transform.set", 1) == Entry::CandidateTransformSet1 && IsEffectful(Entry::CandidateTransformSet1));
-        CHECK(Lookup("candidate.transform.set", 2) == Entry::Unknown);
+        // M6-G1: (name, version) is the capability identity: v2 is its own effectful entry; v3 / v0 are unknown.
+        CHECK(Lookup("candidate.transform.set", 2) == Entry::CandidateTransformSet2 && IsEffectful(Entry::CandidateTransformSet2));
+        CHECK(Lookup("candidate.transform.set", 3) == Entry::Unknown && Lookup("candidate.transform.set", 0) == Entry::Unknown);
+        CHECK(std::string(TransformModeText(TransformMode::Lift)) == "lift" && std::string(TransformModeText(TransformMode::Restore)) == "restore" && std::string(TransformModeText(TransformMode::StepY)) == "step_y");
 
         DecodeOptions s_V2Eff;
         s_V2Eff.protocol_version = 2;
@@ -248,6 +276,42 @@ void RunTransformObservationTests()
         // The version-1 link never decodes the effectful entry.
         const auto s_V1Line = DecodeCommand(Line(s_Lift, s_Pre, "candidate.transform.set", 1).replace(28, 1, "1"), s_V1);
         CHECK(!s_V1Line.ok && Contains(s_V1Line.reason, "effectful setting disabled"));
+        CHECK(s_Ok.ok && s_Ok.command.transform->version == 1 && s_RestoreOk.command.transform->version == 1);
+
+        // ---- M6-G1: candidate.transform.set v2 — step_y | restore; every other pairing refused ----
+        const std::string s_Step = "{\"mode\":\"step_y\",\"expect_world\":\"" + s_World + "\",\"expect_local\":\"" + s_Local + "\",\"expect_parent\":\"007c57a6ea581f8c\"}";
+        const std::string s_StepTarget = FloatWords::Encode(TransformObservation::StepYTarget(FakeTransform::WorldOf(0.f, 0.f, -1.539356f)));
+        const std::string s_RestoreV2 = "{\"mode\":\"restore\",\"expect_world\":\"" + s_StepTarget + "\",\"expect_local\":\"" + s_Local + "\",\"expect_parent\":\"007c57a6ea581f8c\",\"target_world\":\"" + s_World + "\",\"restore_of\":\"9c8f3a75-7054-457c-919d-ee87e77f57d9\"}";
+        const auto s_StepOk = DecodeCommand(Line(s_Step, s_Pre, "candidate.transform.set", 2), s_V2Eff);
+        CHECK(s_StepOk.ok && s_StepOk.command.entry == Entry::CandidateTransformSet2 && s_StepOk.command.version == 2 && s_StepOk.command.transform && s_StepOk.command.transform->mode == TransformMode::StepY && s_StepOk.command.transform->version == 2);
+        CHECK(s_StepOk.ok && FloatWords::Encode(s_StepOk.command.transform->expect_world) == s_World && !s_StepOk.command.transform->target_world && !s_StepOk.command.transform->restore_of);
+        CHECK(s_StepOk.ok && s_StepOk.command.params.size() == 1 && s_StepOk.command.params[0].second == "step_y");
+        const auto s_RestoreV2Ok = DecodeCommand(Line(s_RestoreV2, s_Pre, "candidate.transform.set", 2), s_V2Eff);
+        CHECK(s_RestoreV2Ok.ok && s_RestoreV2Ok.command.entry == Entry::CandidateTransformSet2 && s_RestoreV2Ok.command.transform->mode == TransformMode::Restore && s_RestoreV2Ok.command.transform->version == 2);
+        auto s_RejectV = [&](const std::string& p_Params, uint32_t p_Version, const DecodeOptions& p_Options, const char* p_Needle) {
+            const auto s_Decoded = DecodeCommand(Line(p_Params, s_Pre, "candidate.transform.set", p_Version), p_Options);
+            const bool s_Ok = !s_Decoded.ok && Contains(s_Decoded.reason, p_Needle);
+            if (!s_Ok)
+                std::printf("  transform v%u decode: expected '%s', got ok=%d reason '%s'\n", p_Version, p_Needle, s_Decoded.ok, s_Decoded.reason.c_str());
+            CHECK(s_Ok);
+        };
+        s_RejectV(s_Step, 1, s_V2Eff, "invalid parameter: mode (missing or not lift|restore)");   // v1 step_y
+        s_RejectV(s_Lift, 2, s_V2Eff, "invalid parameter: mode (missing or not step_y|restore)"); // v2 lift
+        s_RejectV(s_Step, 3, s_V2Eff, "unknown");                                                 // an unknown version
+        s_RejectV(s_Step, 2, s_V2Inert, "effectful setting disabled: candidate.transform.set/2 not executable");
+        s_RejectV(s_Lift, 1, s_V2Inert, "effectful setting disabled: candidate.transform.set/1 not executable"); // v1's text unchanged
+        s_RejectV("{\"mode\":\"step_y\",\"expect_world\":\"" + s_World + "\",\"expect_local\":\"" + s_Local + "\",\"expect_parent\":\"007c57a6ea581f8c\",\"target_world\":\"" + s_StepTarget + "\"}", 2, s_V2Eff, "a step_y carries no target_world or restore_of");
+        s_RejectV("{\"mode\":\"step_y\",\"expect_world\":\"" + s_World + "\",\"expect_local\":\"" + s_Local + "\",\"expect_parent\":\"007c57a6ea581f8c\",\"axis\":\"x\"}", 2, s_V2Eff, "unknown parameter: axis");
+        s_RejectV("{\"mode\":\"step_y\",\"expect_world\":\"" + s_World + "\",\"expect_local\":\"" + s_Local + "\",\"expect_parent\":\"007c57a6ea581f8c\",\"distance\":\"1.0\"}", 2, s_V2Eff, "unknown parameter: distance");
+        {
+            // a version-1 link (no effectful decoding) refuses v2 too, exactly as it refuses v1
+            const auto s_Decoded = DecodeCommand(Line(s_Step, s_Pre, "candidate.transform.set", 2).replace(28, 1, "1"), s_V1);
+            CHECK(!s_Decoded.ok && Contains(s_Decoded.reason, "effectful setting disabled: candidate.transform.set/2"));
+        }
+        {
+            const auto s_Decoded = DecodeCommand(Line(s_Step, "{}", "candidate.transform.set", 2), s_V2Eff);
+            CHECK(!s_Decoded.ok && Contains(s_Decoded.reason, "missing precondition: mission_generation"));
+        }
     }
 
     // ---- the post-call classifiers ----------------------------------------------------------------

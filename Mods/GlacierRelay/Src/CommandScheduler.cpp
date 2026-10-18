@@ -638,8 +638,10 @@ bool CommandScheduler::Tick(const FrameObservation& p_Frame)
         }
 
         case CommandProtocol::Entry::CandidateTransformSet1:
+        case CommandProtocol::Entry::CandidateTransformSet2:
         {
-            // M6-F: the second effectful entry. Without a transform applier on this frame source
+            // M6-F: the second effectful entry; M6-G1: its v2 (step_y | restore) shares this one
+            // path, the one applier and the one ledger. Without a transform applier on this frame source
             // (tests without one, the probe's inert modes) it is rejected, never applied.
             ++m_Stats.transform_dispatched;
             m_Stats.last_executed_frame = p_Frame.frame;

@@ -330,6 +330,7 @@ bool CommandLink::Handshake()
     {
         s_Hello.capabilities.push_back("player.outfit.set/2");
         s_Hello.capabilities.push_back("candidate.transform.set/1"); // M6-F
+        s_Hello.capabilities.push_back("candidate.transform.set/2"); // M6-G1 (step_y | restore)
     }
 
     {

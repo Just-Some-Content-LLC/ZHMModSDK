@@ -63,6 +63,8 @@ namespace TransformApply
             case Reason::RestoreGenerationChanged: return "restore_generation_changed";
             case Reason::CurrentNotPostimage: return "current_not_postimage";
             case Reason::AlreadyRestored: return "already_restored";
+            case Reason::EntryModeUnsupported: return "entry_mode_unsupported";
+            case Reason::RestoreVersionMismatch: return "restore_version_mismatch";
         }
         return "unknown";
     }
@@ -94,6 +96,33 @@ namespace TransformApply
         return s_Text;
     }
 
+    namespace
+    {
+        // M6-G1: the allowed (entry version, mode) pairs; anything else is refused by the gate.
+        bool SupportedPair(const TransformRequest& p_Request)
+        {
+            if (p_Request.version == 1)
+                return p_Request.mode == TransformMode::Lift || p_Request.mode == TransformMode::Restore;
+            if (p_Request.version == 2)
+                return p_Request.mode == TransformMode::StepY || p_Request.mode == TransformMode::Restore;
+            return false;
+        }
+
+        // A forward is a v1 lift or a v2 step_y: the one shared budget, the operation record.
+        bool IsForward(const TransformRequest& p_Request)
+        {
+            return p_Request.mode == TransformMode::Lift || p_Request.mode == TransformMode::StepY;
+        }
+
+        // The compiled forward target of the request's mode (only for a supported pair).
+        Words12 ForwardTarget(const TransformRequest& p_Request, const Words12& p_Preimage)
+        {
+            return p_Request.mode == TransformMode::StepY || (p_Request.mode == TransformMode::Restore && p_Request.version == 2)
+                ? TransformObservation::StepYTarget(p_Preimage)
+                : TransformObservation::LiftTarget(p_Preimage);
+        }
+    }
+
     GateVerdict EvaluateTransform(const GateInput& p_Input)
     {
         GateVerdict s_Verdict;
@@ -108,6 +137,13 @@ namespace TransformApply
         const TransformRequest& s_Request = *p_Input.request;
         const Reads& s_Reads = *p_Input.reads;
         const Ledger& s_Ledger = *p_Input.ledger;
+
+        // 0. M6-G1: the (entry version, mode) pair must be one of v1 lift | restore, v2 step_y |
+        //    restore — the decoder admits nothing else, and the gate refuses it again rather than
+        //    falling through into another operation (no target is computed for it).
+        const bool s_Supported = SupportedPair(s_Request);
+        if (!s_Supported)
+            s_Fail(Reason::EntryModeUnsupported);
 
         // 1. The compiled candidate's identity on this frame (M6-D1a semantics): present on a
         //    complete scan, resolved through the template factory in range, the hero interface,
@@ -166,10 +202,11 @@ namespace TransformApply
                 s_Fail(Reason::ExpectParentMismatch);
         }
 
-        // 5. The target: the compiled lift from the preimage, or the bound restore target.
-        if (s_PreReadable)
+        // 5. The target: the compiled forward from the preimage (v1 lift: z + 0.25f; v2 step_y:
+        //    y + 0.25f), or the bound restore target.
+        if (s_PreReadable && s_Supported)
         {
-            Words12 s_Target = s_Request.mode == TransformMode::Restore && s_Request.target_world ? *s_Request.target_world : TransformObservation::LiftTarget(*s_Pre.world.value);
+            Words12 s_Target = s_Request.mode == TransformMode::Restore && s_Request.target_world ? *s_Request.target_world : ForwardTarget(s_Request, *s_Pre.world.value);
             s_Verdict.target = s_Target;
             if (!FloatWords::AllFinite(s_Target))
                 s_Fail(Reason::TargetNotFinite);
@@ -177,8 +214,9 @@ namespace TransformApply
                 s_Fail(Reason::TargetEqualsCurrent);
         }
 
-        // 6. The ledger: the budget for a lift; the operation record for a restore.
-        if (s_Request.mode == TransformMode::Lift)
+        // 6. The ledger: the one shared budget for a forward (a v1 lift or a v2 step_y); the
+        //    operation record for a restore, which must name the forward's own entry version.
+        if (IsForward(s_Request))
         {
             if (s_Ledger.forward_budget == 0)
                 s_Fail(Reason::BudgetExhausted);
@@ -197,6 +235,8 @@ namespace TransformApply
                     s_Fail(Reason::OperationRecordInvalidated);
                 if (s_Ledger.state == Ledger::State::Restored)
                     s_Fail(Reason::AlreadyRestored);
+                if (s_Ledger.forward_version != s_Request.version)
+                    s_Fail(Reason::RestoreVersionMismatch);
                 if (!s_Request.restore_of || *s_Request.restore_of != s_Ledger.forward_id)
                     s_Fail(Reason::OperationRecordMismatch);
                 if (s_Ledger.forward_effect != Effect::Changed)
@@ -555,6 +595,17 @@ namespace TransformApply
         s_GateInput.link_generation_now = s_LinkNow;
         GateVerdict s_Gate = EvaluateTransform(s_GateInput);
 
+        // M6-G1: the request's entry version must be the decoded command's own (the decoder sets
+        // both; an internal disagreement is refused, never resolved in favour of either).
+        if (s_Command.version != s_Request.version)
+        {
+            bool s_Listed = false;
+            for (const auto s_Reason : s_Gate.reasons)
+                s_Listed = s_Listed || s_Reason == Reason::EntryModeUnsupported;
+            if (!s_Listed)
+                s_Gate.reasons.push_back(Reason::EntryModeUnsupported);
+        }
+
         // The mandatory result's capacity on the actual encoding, measured before any call with
         // this frame's values; a failure is one more refusal (nothing is called).
         if (s_Gate.target)
@@ -588,8 +639,8 @@ namespace TransformApply
             {
                 s_ApplyLogAttempted = true;
                 s_ApplyLog = RelayLog::InfoChecked(
-                    "command: {} applying candidate.transform.set/1 mode {} on frame {}: candidate {} in {}; generation expected {} fresh {}; epoch {}; link generation {}; preimage world {} local {} parent {} dirty 0; target world {}{}{}",
-                    s_Command.command_id, CommandProtocol::TransformModeText(s_Request.mode), p_Context.frame,
+                    "command: {} applying candidate.transform.set/{} mode {} on frame {}: candidate {} in {}; generation expected {} fresh {}; epoch {}; link generation {}; preimage world {} local {} parent {} dirty 0; target world {}{}{}",
+                    s_Command.command_id, s_Request.version, CommandProtocol::TransformModeText(s_Request.mode), p_Context.frame,
                     s_Reads.entity_id, s_Reads.brick_id,
                     s_Command.mission_generation_precondition ? *s_Command.mission_generation_precondition : "?",
                     s_Reads.generation_fresh.observed() ? *s_Reads.generation_fresh.value : "?",
@@ -602,11 +653,13 @@ namespace TransformApply
                 if (s_ApplyLog.status == RelayLog::WriteStatus::Written)
                 {
                     // The budget is consumed by the call actually made, never by a refusal.
-                    if (s_Request.mode == TransformMode::Lift)
+                    if (IsForward(s_Request))
                     {
                         p_Ledger.forward_budget = 0;
                         p_Ledger.state = Ledger::State::ForwardInvoked;
                         p_Ledger.forward_id = s_Command.command_id;
+                        p_Ledger.forward_version = s_Request.version;
+                        p_Ledger.forward_mode = s_Request.mode;
                         p_Ledger.link_generation = s_LinkAtCall;
                         p_Ledger.mission_generation = *s_Reads.generation_fresh.value;
                         p_Ledger.preimage_world = *s_Pre.world.value;
@@ -751,7 +804,7 @@ namespace TransformApply
             p_Result.reason = s_Note;
 
             // The ledger: the forward effect and postimage; the invalidations of section 12.6.
-            if (s_Request.mode == TransformMode::Lift)
+            if (IsForward(s_Request))
             {
                 p_Ledger.forward_effect = s_Outcome.effect;
                 if (s_Post.candidate.world.observed())

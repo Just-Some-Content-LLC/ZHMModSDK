@@ -40,6 +40,8 @@ namespace TransformApply
     // forward; invalidated by a fault, an uncertain forward effect, a control change, a link or
     // mission generation change at the restore, or a lost record (a new process starts at None
     // with the budget — the forward budget is consumed only by a forward call actually made).
+    // M6-G1: the forward is a v1 lift or a v2 step_y — ONE budget shared by both; the record keeps
+    // the forward's entry version and mode, and a restore must name the same entry version.
     struct Ledger
     {
         enum class State
@@ -53,6 +55,8 @@ namespace TransformApply
         uint32_t forward_budget = 1;
         State state = State::None;
         std::string forward_id;
+        uint32_t forward_version = 0;                                                   // 1: a lift, 2: a step_y (0: none yet)
+        CommandProtocol::TransformMode forward_mode = CommandProtocol::TransformMode::Lift;
         uint64_t link_generation = 0;
         std::string mission_generation;
         Words12 preimage_world;
@@ -109,6 +113,8 @@ namespace TransformApply
         RestoreGenerationChanged,
         CurrentNotPostimage,
         AlreadyRestored,
+        EntryModeUnsupported,  // M6-G1: not one of v1 lift | restore, v2 step_y | restore (never falls through)
+        RestoreVersionMismatch, // M6-G1: a restore whose entry version is not the forward's
     };
 
     const char* ReasonCode(Reason p_Reason);

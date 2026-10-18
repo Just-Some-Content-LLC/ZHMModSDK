@@ -93,7 +93,11 @@ namespace CommandProtocol
     // decodable under the same setting: a "lift" (the compiled +0.25 world-z displacement of the
     // compiled candidate, computed natively) or a "restore" (the journaled preimage world group of
     // one earlier lift, bound to it), each with the exact expectation groups of a recent exact
-    // inspection; any other name/version is unknown.
+    // inspection; candidate.transform.set v2 (M6-G1) is the third effectful entry, decodable under the
+    // same setting: a "step_y" (the compiled +0.25 world-y displacement of the compiled candidate,
+    // computed natively) or a "restore" (the journaled preimage of one earlier v2 step, bound to it);
+    // the capability identity is the (name, version) pair — a v1 restore restores only a v1 lift and
+    // a v2 restore only a v2 step; any other name/version is unknown.
     enum class Entry
     {
         Unknown,
@@ -106,17 +110,21 @@ namespace CommandProtocol
         RelayInspectCandidate1,
         RelayInspectCandidateTransform1,
         CandidateTransformSet1,
+        CandidateTransformSet2,
     };
 
-    // candidate.transform.set v1 (M6-F; design section 12.5): the mode, the exact expectation of
-    // the current state (the world and parent-relative groups and the parent id of a recent exact
-    // inspection), and for a restore the journaled preimage world group and the original command
-    // it restores. Nothing else: no location, direction, rotation, scale, distance, entity,
-    // pointer or function name is a parameter.
+    // candidate.transform.set v1 (M6-F; design section 12.5) and v2 (M6-G1; glacier-relay
+    // docs/design/M6G_VISIBLE_CONTROL.md section 6): the mode, the exact expectation of the current
+    // state (the world and parent-relative groups and the parent id of a recent exact inspection),
+    // and for a restore the journaled preimage world group and the original command it restores.
+    // Nothing else: no location, direction, rotation, scale, distance, entity, pointer or function
+    // name is a parameter. The allowed pairs: v1 lift | restore, v2 step_y | restore; every other
+    // pair is refused at decode and again by the apply's gate.
     enum class TransformMode
     {
-        Lift,
-        Restore,
+        Lift,    // v1 only: the compiled +0.25f world-z displacement
+        Restore, // v1 and v2: restores a forward of the same entry version
+        StepY,   // v2 only: the compiled +0.25f world-y displacement
     };
 
     const char* TransformModeText(TransformMode p_Mode);
@@ -124,6 +132,7 @@ namespace CommandProtocol
     struct TransformRequest
     {
         TransformMode mode = TransformMode::Lift;
+        uint32_t version = 1;                               // the entry version the request was decoded under (1 or 2)
         FloatWords::Words12 expect_world;
         FloatWords::Words7 expect_local;
         std::string expect_parent;                          // 16 lowercase hex, or "none"

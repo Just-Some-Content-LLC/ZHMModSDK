@@ -12,6 +12,14 @@ namespace TransformObservation
         return s_Target;
     }
 
+    Words12 StepYTarget(const Words12& p_Preimage)
+    {
+        Words12 s_Target = p_Preimage;
+        const float s_Y = FloatWords::ToFloat(p_Preimage.w[10]);
+        s_Target.w[10] = FloatWords::ToWord(s_Y + k_StepY);
+        return s_Target;
+    }
+
     void Append(Entries& p_Out, const char* p_Name, const Field<Words12>& p_Field)
     {
         if (p_Field.observed())

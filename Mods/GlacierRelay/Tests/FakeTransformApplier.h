@@ -30,7 +30,7 @@ namespace FakeTransform
         Unchanged,           // the fake setter returns and nothing changes
         Elsewhere,           // the fake setter leaves a translation that is neither prior nor requested
         AxesElsewhere,       // the translation reaches the target but an axis word differs (not an all-12 match)
-        LocalFollows,        // the world reaches the target and the parent-relative translation follows it
+        LocalFollows,        // the world reaches the target and the parent-relative translation follows it (all three words: a lift's z, a step's y)
         DirtyPost,           // the fake setter stores the target and sets the dirty flag (indeterminate)
         ReadBackUnavailable, // the fake setter stores the target but the read-back cannot read the candidate
         PostGenerationChange,// the fake registry names another generation after the call
@@ -42,7 +42,7 @@ namespace FakeTransform
         ControlDrifts,       // the local hero's translation drifts by 1e-5 (within the declared tolerance)
     };
 
-    // What a LATER inspection (the probe's scripted later frame) shows after a fake lift.
+    // What a LATER inspection (the probe's scripted later frame) shows after a fake forward (a lift or a step).
     enum class Later
     {
         Held,     // the target persists
@@ -302,7 +302,9 @@ namespace FakeTransform
                     break;
                 case Mode::LocalFollows:
                     world.world = p_World;
-                    world.local.w[2] = p_World.w[11];
+                    world.local.w[0] = p_World.w[9];   // M6-G1: the whole translation follows (identical to
+                    world.local.w[1] = p_World.w[10];  // the M6-F z-only copy for a lift, whose x / y words
+                    world.local.w[2] = p_World.w[11];  // are the preimage's, equal to the local ones in every fake world)
                     break;
                 case Mode::DirtyPost:
                     world.world = p_World;

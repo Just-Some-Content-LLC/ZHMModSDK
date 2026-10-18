@@ -32,7 +32,8 @@ namespace TransformObservation
     constexpr const char* k_Brick = CandidateObservation::k_DefaultBrick;   // 007c57a6ea581f8c (compiled; not a parameter)
     constexpr const char* k_Entity = CandidateObservation::k_DefaultEntity; // feede715906f747f (compiled; not a parameter)
     constexpr int64_t k_SnapshotVersion = 1;
-    constexpr float k_LiftZ = 0.25f;               // the one compiled displacement: world z, binary32 addition
+    constexpr float k_LiftZ = 0.25f;               // the v1 compiled displacement: world z, binary32 addition
+    constexpr float k_StepY = 0.25f;               // the v2 compiled displacement (M6-G1): world y, binary32 addition
     constexpr float k_DriftToleranceM = 1.0e-4f;    // the declared comparison tolerance (section 12.8); never equality
 
     // One entity's exact stored transform on one frame.
@@ -78,6 +79,12 @@ namespace TransformObservation
     // The compiled forward target: every word of the preimage copied, Trans.z replaced by
     // preimage.Trans.z + k_LiftZ in binary32 arithmetic (round to nearest).
     Words12 LiftTarget(const Words12& p_Preimage);
+
+    // The v2 compiled forward target (M6-G1): every word of the preimage copied, Trans.y (word 10)
+    // replaced by preimage.Trans.y + k_StepY in binary32 arithmetic (round to nearest). World y is
+    // not a model-relative direction; the unchanged z and rotation words are a request, never a
+    // promise about the engine's post-state.
+    Words12 StepYTarget(const Words12& p_Preimage);
 
     // The 30 inspection entries in a fixed order (the scheduler adds mission_playing, scene_type,
     // receipt_to_frame_ms and reads_on_frame: 34 <= 48): the generation, the targets and version,

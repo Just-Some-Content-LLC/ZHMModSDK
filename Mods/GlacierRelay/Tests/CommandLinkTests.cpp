@@ -123,6 +123,9 @@ void RunCommandLinkTests()
         CHECK(Field(s_Hello, "adapter_instance_id") == s_Adapter);
         CHECK(Field(s_Hello, "command_protocol_version") == "1");
         CHECK(Field(s_Hello, "mission_generation") == "null");
+        // M6-G1: with the effectful setting off, neither transform-set version is advertised (nor the outfit entry).
+        CHECK(s_Hello.find("candidate.transform.set/") == std::string::npos && s_Hello.find("player.outfit.set/2") == std::string::npos);
+        CHECK(s_Hello.find("\"relay.inspect.candidate_transform/1\"") != std::string::npos);
         CHECK(WaitUntil(2000, [&] { return s_Link.LinkGeneration() == 1; }));
         CHECK(s_Link.GetStats().welcomed && s_Link.GetStats().network_thread_id != 0);
 
@@ -308,6 +311,10 @@ void RunCommandLinkTests()
         CHECK(s_Hello.find("\"relay.inspect.players/1\"") != std::string::npos && s_Hello.find("\"relay.inspect.entity/1\"") != std::string::npos);
         // M6-D1a: the candidate inspection is claimed too (read-only; inert arming only on BEAM's side).
         CHECK(s_Hello.find("\"relay.inspect.candidate/1\"") != std::string::npos);
+        // M6-F / M6-G1: with the effectful setting on, both transform-set versions are advertised as
+        // separate (name, version) capabilities; nothing else of that name.
+        CHECK(s_Hello.find("\"candidate.transform.set/1\"") != std::string::npos && s_Hello.find("\"candidate.transform.set/2\"") != std::string::npos);
+        CHECK(s_Hello.find("\"candidate.transform.set/3\"") == std::string::npos);
         CHECK(s_Hello.find(s_Token) == std::string::npos);
 
         s_Beam.Send(CommandTest::WelcomeV2(1, s_Nonce1));
