@@ -75,13 +75,35 @@
 // FIRST "applying candidate.transform.set/<1|2>" line. transform-later (M6-F): what the first inspection
 // AFTER a fake forward (a v1 lift or a v2 step_y) shows — "held" (default), "returned", "near", "drifted", "dirty". Every value is
 // scripted and is never an observation of HITMAN; no engine, no SDK function.
+// M7-B2 adds the motion mode, from the environment (no new positional argument): with
+// GLACIER_PROBE_MOTION_PORT set (with the token: the motion link binds only to an attested version-2
+// command link) the probe runs the real MotionLink to BEAM's motion listener (127.0.0.1:<port>), the
+// real Motion::Controller on its fake frame thread after the scheduler, and advertises
+// player.pose.share/1 (and candidate.motion.session/1 when effectful) — exactly the DLL's [motion]
+// wiring, with the FAKE transform world as the engine: the sampler reads the FAKE local hero, the
+// session's one setter call is the FAKE applier's. Every motion line the native queued is printed
+// ("command probe: motion> <line>", with its queue outcome) so a driver can compare it with BEAM's
+// trace value for value. GLACIER_PROBE_MOTION_SCRIPT (comma-separated, scripted FAKE events):
+// hero-step-mm:<n> (the FAKE hero's x grows by n mm per frame), inexact-from:<k> (from the k-th FAKE
+// setter call on, the FAKE setter leaves z off the request: the first inexact postimage),
+// stall-at:<frame>:<ms> (the fake frame thread stops for ms before that frame: a stalled frame
+// callback), z-drift-at:<frame> (the FAKE engine changes the candidate's z word at that frame: an
+// untouched-word change), hero-dirty-every:<k> (every k-th frame the FAKE hero reads dirty),
+// stall-at-invoke:<k>:<ms> and z-drift-at-invoke:<k> (the same two events, once, on the first frame
+// after the k-th FAKE setter call: an end-to-end run cannot know frame numbers in advance).
+// GLACIER_PROBE_STDIN_EXIT=1 ends the probe when its standard input closes (bounded teardown by its
+// owner); the duration argument stays the failsafe. Every value is scripted; nothing is HITMAN state.
 // Exit code 0 when the link connected and was welcomed at least once.
 
 #include <Windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <iostream>
+#include <mutex>
+#include <optional>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -93,6 +115,8 @@
 #include "FakeCandidate.h"
 #include "FakeOutfitApplier.h"
 #include "FakeTransformApplier.h"
+#include "MotionController.h"
+#include "MotionLink.h"
 #include "PlayerObservation.h"
 #include "RelayAdapter.h"
 #include "RelayLog.h"
@@ -695,6 +719,97 @@ namespace
     }
 }
 
+namespace
+{
+    // M7-B2: the probe's view of the real motion link, printing every line the native queued (the
+    // queue outcome beside it) for the driver's value-for-value comparison; everything else is the
+    // real link's.
+    class RecordingLink final : public IMotionLink
+    {
+    public:
+        explicit RecordingLink(MotionLink& p_Link) : m_Link(p_Link) {}
+        Binding Current() const override { return m_Link.Current(); }
+        std::vector<Inbound> Drain() override { return m_Link.Drain(); }
+        uint64_t Signals() const override { return m_Link.Signals(); }
+        Queued SendControl(uint64_t p_Serial, std::string p_Line) override { return Record("control", m_Link.SendControl(p_Serial, p_Line), p_Line); }
+        Queued SendSample(uint64_t p_Serial, std::string p_Line) override { return Record("sample", m_Link.SendSample(p_Serial, p_Line), p_Line); }
+        void Drop(uint64_t p_Serial, const char* p_Reason) override
+        {
+            std::printf("command probe: motion drop serial %llu (%s)\n", static_cast<unsigned long long>(p_Serial), p_Reason);
+            m_Link.Drop(p_Serial, p_Reason);
+        }
+
+    private:
+        Queued Record(const char* p_Queue, Queued p_Outcome, const std::string& p_Line)
+        {
+            const char* s_Outcome = p_Outcome == Queued::Queued ? "queued" : p_Outcome == Queued::Full ? "full" : "not_bound";
+            std::string s_Line = p_Line;
+            if (!s_Line.empty() && s_Line.back() == '\n')
+                s_Line.pop_back();
+            std::printf("command probe: motion> %s %s %s\n", p_Queue, s_Outcome, s_Line.c_str());
+            return p_Outcome;
+        }
+
+        MotionLink& m_Link;
+    };
+
+    struct MotionScript
+    {
+        uint32_t hero_step_mm = 0;
+        uint32_t inexact_from = 0;
+        uint64_t stall_frame = 0;
+        uint32_t stall_ms = 0;
+        uint64_t z_drift_frame = 0;
+        uint32_t hero_dirty_every = 0;
+        uint32_t stall_after_invokes = 0;
+        uint32_t z_drift_after_invokes = 0;
+    };
+
+    MotionScript ParseMotionScript(const std::string& p_Text)
+    {
+        MotionScript s_Script;
+        size_t s_At = 0;
+        while (s_At < p_Text.size())
+        {
+            size_t s_End = p_Text.find(',', s_At);
+            if (s_End == std::string::npos)
+                s_End = p_Text.size();
+            const std::string s_Item = p_Text.substr(s_At, s_End - s_At);
+            s_At = s_End + 1;
+            const size_t s_Colon = s_Item.find(':');
+            const std::string s_Key = s_Item.substr(0, s_Colon);
+            const std::string s_Value = s_Colon == std::string::npos ? "" : s_Item.substr(s_Colon + 1);
+            if (s_Key == "hero-step-mm") s_Script.hero_step_mm = static_cast<uint32_t>(std::atoi(s_Value.c_str()));
+            else if (s_Key == "inexact-from") s_Script.inexact_from = static_cast<uint32_t>(std::atoi(s_Value.c_str()));
+            else if (s_Key == "z-drift-at") s_Script.z_drift_frame = static_cast<uint64_t>(std::atoll(s_Value.c_str()));
+            else if (s_Key == "hero-dirty-every") s_Script.hero_dirty_every = static_cast<uint32_t>(std::atoi(s_Value.c_str()));
+            else if (s_Key == "z-drift-at-invoke") s_Script.z_drift_after_invokes = static_cast<uint32_t>(std::atoi(s_Value.c_str()));
+            else if (s_Key == "stall-at-invoke")
+            {
+                const size_t s_Second = s_Value.find(':');
+                s_Script.stall_after_invokes = static_cast<uint32_t>(std::atoi(s_Value.substr(0, s_Second).c_str()));
+                s_Script.stall_ms = s_Second == std::string::npos ? 0 : static_cast<uint32_t>(std::atoi(s_Value.substr(s_Second + 1).c_str()));
+            }
+            else if (s_Key == "stall-at")
+            {
+                const size_t s_Second = s_Value.find(':');
+                s_Script.stall_frame = static_cast<uint64_t>(std::atoll(s_Value.substr(0, s_Second).c_str()));
+                s_Script.stall_ms = s_Second == std::string::npos ? 0 : static_cast<uint32_t>(std::atoi(s_Value.substr(s_Second + 1).c_str()));
+            }
+            else if (!s_Key.empty())
+                std::printf("command probe: motion script item '%s' unknown (ignored)\n", s_Item.c_str());
+        }
+        return s_Script;
+    }
+
+    std::string Env(const char* p_Name)
+    {
+        char s_Buffer[512] = {};
+        const DWORD s_Len = GetEnvironmentVariableA(p_Name, s_Buffer, sizeof(s_Buffer));
+        return s_Len > 0 && s_Len < sizeof(s_Buffer) ? std::string(s_Buffer, s_Len) : std::string();
+    }
+}
+
 int main(int p_Argc, char** p_Argv)
 {
     if (p_Argc < 4)
@@ -810,6 +925,14 @@ int main(int p_Argc, char** p_Argv)
         RelayLog::Info("command probe: scripted raw log writer installed (mode {}); this line and the following ones are in the pass-through file", s_ApplyMode);
     }
 
+    // M7-B2: the motion mode (the DLL's [motion] wiring; see the header).
+    const std::string s_MotionPortText = Env("GLACIER_PROBE_MOTION_PORT");
+    const bool s_Motion = !s_MotionPortText.empty();
+    const MotionScript s_Script = ParseMotionScript(Env("GLACIER_PROBE_MOTION_SCRIPT"));
+    std::printf("command probe: motion %s%s; script hero-step-mm %u inexact-from %u stall-at %llu:%u stall-at-invoke %u z-drift-at %llu z-drift-at-invoke %u hero-dirty-every %u (FAKE events; never HITMAN state)\n",
+        s_Motion ? "on, port " : "off", s_Motion ? s_MotionPortText.c_str() : "", s_Script.hero_step_mm, s_Script.inexact_from, static_cast<unsigned long long>(s_Script.stall_frame), s_Script.stall_ms, s_Script.stall_after_invokes,
+        static_cast<unsigned long long>(s_Script.z_drift_frame), s_Script.z_drift_after_invokes, s_Script.hero_dirty_every);
+
     CommandQueue s_Queue;
     CommandLink::Options s_Options;
     s_Options.port = s_Port;
@@ -817,7 +940,38 @@ int main(int p_Argc, char** p_Argv)
     s_Options.backoff_max_ms = 2000;
     s_Options.effectful = s_Effectful;
     s_Options.token = s_Token;
+    s_Options.motion = s_Motion;
     CommandLink s_Link(s_Options, s_Queue, s_Adapter, MonoMs);
+
+    std::unique_ptr<MotionLink> s_MotionLink;
+    std::unique_ptr<RecordingLink> s_MotionView;
+    std::unique_ptr<Motion::Controller> s_MotionController;
+    if (s_Motion)
+    {
+        MotionLink::Options s_MotionOptions;
+        s_MotionOptions.port = static_cast<uint16_t>(std::atoi(s_MotionPortText.c_str()));
+        s_MotionOptions.backoff_initial_ms = 500;
+        s_MotionOptions.backoff_max_ms = 2000;
+        s_MotionOptions.token = s_Token;
+        s_MotionLink = std::make_unique<MotionLink>(s_MotionOptions, s_Adapter, MonoMs, [&] { return s_Link.AttestedGeneration(); });
+        s_MotionView = std::make_unique<RecordingLink>(*s_MotionLink);
+        Motion::Controller::Options s_ControllerOptions;
+        s_ControllerOptions.effectful = s_Effectful;
+        s_MotionController = std::make_unique<Motion::Controller>(s_ControllerOptions, s_MotionView.get());
+    }
+
+    // Bounded teardown by the probe's owner: the probe ends when its standard input closes.
+    std::atomic<bool> s_StdinClosed{false};
+    std::thread s_StdinThread;
+    if (Env("GLACIER_PROBE_STDIN_EXIT") == "1")
+    {
+        s_StdinThread = std::thread([&] {
+            std::string s_Ignored;
+            while (std::getline(std::cin, s_Ignored)) {}
+            s_StdinClosed = true;
+        });
+        s_StdinThread.detach();
+    }
     CommandScheduler s_Scheduler(s_Queue, [&](const CommandProtocol::Result& p_Result) {
         RelayLog::Info("command probe: result {} {} frame {} ({})", p_Result.command_id, CommandProtocol::StatusText(p_Result.status), p_Result.frame ? *p_Result.frame : 0, p_Result.reason);
         std::printf("command probe: result %s %s frame %llu (%s)\n", p_Result.command_id.c_str(), CommandProtocol::StatusText(p_Result.status), p_Result.frame ? *p_Result.frame : 0ull, p_Result.reason.c_str());
@@ -838,6 +992,8 @@ int main(int p_Argc, char** p_Argv)
         uint64_t s_RiseFrame = 0, s_RiseMono = 0;
         bool s_PrevPlaying = false;
         bool s_RegistryChangeAdvanced = false;
+        bool s_StallDone = false;
+        bool s_DriftDone = false;
         std::optional<std::string> s_Cached;
         std::optional<std::string> s_ContractStarted, s_ContractEnded;
         const std::string s_Generation1 = "fake-session-" + s_Adapter.substr(0, 8) + "-1";
@@ -947,15 +1103,70 @@ int main(int p_Argc, char** p_Argv)
             s_Observation.transform_applier = s_Effectful ? &s_Transform : nullptr;
             s_Observation.link_generation_now = [&] { return s_Link.LinkGeneration(); };
 
+            // M7-B2: the motion controller sits beside the scheduler on the frame.
+            s_Observation.motion = s_MotionController.get();
+
+            const bool s_StallByInvoke = s_Motion && s_Script.stall_after_invokes != 0 && !s_StallDone && s_Transform.inner.invokes >= static_cast<int>(s_Script.stall_after_invokes);
+            if (s_StallByInvoke || (s_Motion && s_Script.stall_frame != 0 && s_Frame == s_Script.stall_frame))
+            {
+                s_StallDone = true;
+                std::printf("command probe: FAKE frame callback stalled for %u ms before fake frame %llu\n", s_Script.stall_ms, static_cast<unsigned long long>(s_Frame));
+                std::this_thread::sleep_for(std::chrono::milliseconds(s_Script.stall_ms));
+                s_Observation.now_mono_ms = MonoMs();
+            }
+            if (s_Motion)
+            {
+                auto& w = s_Transform.inner.world;
+                if (s_Script.hero_step_mm != 0)
+                    w.hero_world.w[9] = FloatWords::ToWord(FloatWords::ToFloat(w.hero_world.w[9]) + static_cast<float>(s_Script.hero_step_mm) / 1000.0f);
+                w.hero_dirty = s_Script.hero_dirty_every != 0 && s_Frame % s_Script.hero_dirty_every == 0;
+                const bool s_DriftByInvoke = s_Script.z_drift_after_invokes != 0 && !s_DriftDone && s_Transform.inner.invokes >= static_cast<int>(s_Script.z_drift_after_invokes);
+                if (s_DriftByInvoke || (s_Script.z_drift_frame != 0 && s_Frame == s_Script.z_drift_frame))
+                {
+                    s_DriftDone = true;
+                    w.world.w[11] += 1;
+                    std::printf("command probe: FAKE engine changed the candidate's z word at fake frame %llu\n", static_cast<unsigned long long>(s_Frame));
+                }
+                if (s_Script.inexact_from != 0 && static_cast<uint32_t>(s_Transform.inner.invokes) + 1 >= s_Script.inexact_from)
+                    w.mode = FakeTransform::Mode::Elsewhere;
+            }
+
             s_Link.SetMissionGeneration(s_Observation.mission_generation);
             s_Scheduler.Tick(s_Observation);
+
+            if (s_MotionController)
+            {
+                Motion::Frame s_MotionFrame;
+                s_MotionFrame.frame = s_Frame;
+                s_MotionFrame.now_mono_ms = MonoMs();
+                s_MotionFrame.clock = MonoMs;
+                s_MotionFrame.thread_id = s_Observation.thread_id;
+                s_MotionFrame.scene_available = s_Observation.scene_available;
+                s_MotionFrame.scene = s_Observation.scene;
+                s_MotionFrame.mission_playing = s_Observation.mission_playing;
+                s_MotionFrame.mission_generation = s_Observation.mission_generation;
+                s_MotionFrame.relay_transition_epoch = s_Observation.relay_transition_epoch;
+                s_MotionFrame.command_link_generation_now = [&] { return s_Link.LinkGeneration(); };
+                s_MotionFrame.inspector = [&] {
+                    s_Transform.SyncFrame();
+                    return s_Transform.inner.Current(false, s_Transform.inner.world.fresh_generation);
+                };
+                s_MotionFrame.applier = s_Effectful ? &s_Transform : nullptr;
+                s_MotionController->Step(s_MotionFrame);
+            }
+
             s_PrevPlaying = s_Playing;
             s_Frames = s_Frame;
             std::this_thread::sleep_for(std::chrono::milliseconds(s_Interval));
         }
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(s_Duration));
+    // The duration is the failsafe; with GLACIER_PROBE_STDIN_EXIT the owner ends the probe earlier.
+    const uint64_t s_Until = MonoMs() + s_Duration;
+    while (MonoMs() < s_Until && !s_StdinClosed)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (s_StdinClosed)
+        std::printf("command probe: standard input closed; stopping\n");
     s_Stop = true;
     s_FrameThread.join();
 
@@ -980,6 +1191,22 @@ int main(int p_Argc, char** p_Argv)
         s_Transform.inner.observes, s_Transform.inner.invokes, s_Transform.inner.readbacks, s_Transform.inner.Latched() ? 1 : 0
     );
     RelayLog::Info("command probe: transform inspected {} dispatched {} called {} changed {}; ledger {} budget {}", s_Scheduled.transforms_inspected, s_Scheduled.transform_dispatched, s_Scheduled.transform_called, s_Scheduled.transform_changed, TransformApply::StateText(s_Ledger.state), s_Ledger.forward_budget);
+    if (s_MotionController)
+    {
+        const auto m = s_MotionLink->GetStats();
+        std::printf(
+            "command probe: motion link connects %llu disconnects %llu welcomes %llu attests %llu refusals %llu violations %llu serial %llu bound %d generation %llu command generation %llu; lines received %llu targets %llu closes %llu share closes %llu; queued control %llu full %llu samples %llu full %llu; lines sent %llu send failures %llu discarded %llu drops %llu command link changes %llu; last disconnect '%s' last refusal '%s'\n",
+            m.connects, m.disconnects, m.welcomes, m.attests_sent, m.refusals, m.violations, m.serial, m.bound ? 1 : 0, m.motion_generation, m.command_generation, m.lines_received, m.targets_received, m.closes_received, m.share_closes_received,
+            m.control_queued, m.control_full, m.samples_queued, m.samples_full, m.lines_sent, m.send_failures, m.discarded_on_disconnect, m.drop_requests, m.command_link_changes, m.last_disconnect.c_str(), m.last_refusal.c_str()
+        );
+        const auto c = s_MotionController->GetStats();
+        std::printf(
+            "command probe: motion controller shares %llu/%llu samples taken %llu queued %llu dropped %llu unavailable %llu dirty %llu last share close '%s'; sessions %llu/%llu targets %llu applied %llu skipped %llu refused %llu uncertain %llu invocations %llu reports %llu foreign targets %llu late targets %llu stale %llu closes for closed %llu foreign closes %llu control full %llu deadline at call %llu cancelled at call %llu deferred %llu; m6 held %llu released at baseline %llu restores %llu invoked %llu proven %llu; last session close '%s' clean %d; scheduler motion dispatched %llu transform motion held %llu\n",
+            c.shares_opened, c.shares_closed, c.samples_taken, c.samples_queued, c.samples_dropped, c.samples_unavailable, c.samples_dirty, c.last_share_close.c_str(), c.sessions_opened, c.sessions_closed, c.targets_received, c.applied, c.skipped, c.refused, c.uncertain, c.invocations, c.reports_sent,
+            c.foreign_targets, c.late_targets, c.stale_inbound, c.closes_for_closed, c.foreign_closes, c.control_full, c.deadline_at_call, c.cancelled_at_call, c.two_writes_prevented, c.m6_held, c.released_at_baseline, c.restores_dispatched, c.restores_invoked, c.restores_proven,
+            c.last_session_close.c_str(), c.last_close_clean ? 1 : 0, s_Scheduled.motion_dispatched, s_Scheduled.transform_motion_held
+        );
+    }
     RelayLog::Info("command probe: done after {} fake frames; connects {}, executed {}, inspected {}, players inspected {}, entities inspected {}, candidates inspected {}, outfit dispatched {} called {} changed {}, expired {}, violations {}", s_Frames, s_Stats.connects, s_Scheduled.executed, s_Scheduled.inspected, s_Scheduled.players_inspected, s_Scheduled.entities_inspected, s_Scheduled.candidates_inspected, s_Scheduled.outfit_dispatched, s_Scheduled.outfit_called, s_Scheduled.outfit_changed, s_Scheduled.expired, s_Stats.protocol_violations);
 
     return s_Stats.connects > 0 ? 0 : 1;
