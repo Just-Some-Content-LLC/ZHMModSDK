@@ -120,6 +120,12 @@ add_executable(GlacierRelayTests
         Tests/TransformObservationTests.cpp
         Tests/TransformApplyTests.cpp
         Tests/FakeTransformApplier.h
+        Tests/MotionProtocolTests.cpp
+        Tests/MotionLinkTests.cpp
+        Tests/MotionSessionTests.cpp
+        Tests/MotionRestoreTests.cpp
+        Tests/MotionShareTests.cpp
+        Tests/MotionTestRig.h
         Tests/TestListener.h
         Tests/ContractLifecycleTests.cpp
         Tests/DisguiseTelemetryTests.cpp

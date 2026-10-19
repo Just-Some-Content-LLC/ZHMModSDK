@@ -109,6 +109,9 @@ namespace FakeTransform
         Words12 hero_world = WorldOf(-0.035f, -3.832f, -0.413f);
         Words7 hero_local = LocalOf(-0.035f, -3.832f, -0.413f);
         std::string hero_parent = k_HeroParent;
+        std::string hero_id = k_HeroId; // M7-B2: the local hero's authored id (a test may replace the local hero)
+        bool hero_dirty = false;               // M7-B2: the local hero's dirty flag as read
+        bool hero_transform_readable = true;   // M7-B2: false: the hero's identity reads, its transform does not
 
         Mode mode = Mode::ChangeToTarget;
         Later later = Later::Held;
@@ -137,13 +140,15 @@ namespace FakeTransform
 
             if (world.hero_readable)
             {
-                s_Reads.hero_entity_id = Field<std::string>::Observed(k_HeroId);
+                s_Reads.hero_entity_id = Field<std::string>::Observed(world.hero_id);
                 s_Reads.hero_flags = Field<int64_t>::Observed(7);
                 s_Reads.hero.world = Field<Words12>::Observed(world.hero_world);
                 s_Reads.hero.local = Field<Words7>::Observed(world.hero_local);
-                s_Reads.hero.dirty = Field<bool>::Observed(false);
+                s_Reads.hero.dirty = Field<bool>::Observed(world.hero_dirty);
                 s_Reads.hero.parent = Field<std::string>::Observed(world.hero_parent);
-                s_Reads.hero.flags = Field<CandidateObservation::SpatialFlags>::Observed(Flags(false));
+                s_Reads.hero.flags = Field<CandidateObservation::SpatialFlags>::Observed(Flags(world.hero_dirty));
+                if (!world.hero_transform_readable)
+                    TransformObservation::MarkSnapshot(s_Reads.hero, FieldStatus::Unavailable, "fake hero spatial interface not resolved");
             }
             else
             {

@@ -25,6 +25,11 @@ void RunCandidateInspectionTests();
 void RunPropertyGuardTests();
 void RunTransformObservationTests();
 void RunTransformApplyTests();
+void RunMotionProtocolTests();
+void RunMotionLinkTests();
+void RunMotionSessionTests();
+void RunMotionRestoreTests();
+void RunMotionShareTests();
 
 int main()
 {
@@ -53,6 +58,11 @@ int main()
     RunPropertyGuardTests();
     RunTransformObservationTests();
     RunTransformApplyTests();
+    RunMotionProtocolTests();
+    RunMotionLinkTests();
+    RunMotionSessionTests();
+    RunMotionRestoreTests();
+    RunMotionShareTests();
 
     if (g_Failures == 0)
         std::printf("GlacierRelayTests: all checks passed\n");
