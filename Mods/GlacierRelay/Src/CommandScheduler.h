@@ -10,6 +10,7 @@
 #include "CommandQueue.h"
 #include "IOutfitApplier.h"
 #include "ITransformApplier.h"
+#include "MotionController.h"
 #include "OutfitObservation.h"
 #include "PlayerObservation.h"
 #include "PreconditionEvaluator.h"
@@ -97,6 +98,13 @@ public:
         // this frame source). The applier is null unless the plugin's effectful setting is on.
         TransformInspector transform_inspector;
         TransformApply::ITransformApplier* transform_applier = nullptr;
+
+        // M7-B2 (null: the [motion] setting is off; the two motion entries are rejected and the M6
+        // transform path is exactly M6's): the frame thread's motion controller. The scheduler
+        // dispatches player.pose.share/1 and candidate.motion.session/1 to it, asks it for the M6
+        // exclusion before a candidate.transform.set apply, and tells it about a setter call made on
+        // this frame (at most one per frame across both paths).
+        Motion::Controller* motion = nullptr;
     };
 
     struct Stats
@@ -127,6 +135,9 @@ public:
         uint64_t transform_changed = 0;     // classified changed
         uint64_t transform_not_applied = 0; // precondition_failed or unavailable
         uint64_t transform_uncertain = 0;   // classified uncertain (incl. faults)
+        // M7-B2
+        uint64_t motion_dispatched = 0;     // player.pose.share/1 and candidate.motion.session/1 commands that reached the controller
+        uint64_t transform_motion_held = 0; // candidate.transform.set refused because a motion session holds the candidate
         uint32_t first_thread_id = 0;
         uint32_t last_thread_id = 0;
         bool thread_changed = false; // the scheduler was invoked from more than one thread
@@ -180,6 +191,8 @@ private:
     // M6-F
     void InspectCandidateTransform(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
     void ApplyTransform(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame, CommandProtocol::Result& p_Result);
+    // M7-B2: the plain frame context the apply paths take (shared by the motion entries).
+    OutfitApply::Context ApplyContext(const CommandQueue::Pending& p_Pending, const FrameObservation& p_Frame) const;
 
 private:
     CommandQueue& m_Queue;

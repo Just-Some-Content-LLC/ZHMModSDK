@@ -35,6 +35,8 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/LogRelaySink.h
         Src/MissionObserver.cpp
         Src/MissionObserver.h
+        Src/MotionController.cpp
+        Src/MotionController.h
         Src/MotionLink.cpp
         Src/MotionLink.h
         Src/MotionProtocol.cpp

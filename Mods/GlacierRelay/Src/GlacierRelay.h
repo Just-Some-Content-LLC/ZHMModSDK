@@ -13,6 +13,8 @@
 #include "CommandScheduler.h"
 #include "LifecycleTee.h"
 #include "MissionObserver.h"
+#include "MotionController.h"
+#include "MotionLink.h"
 #include "OutfitApplier.h"
 #include "RelayAdapter.h"
 #include "SceneState.h"
@@ -48,6 +50,16 @@ class ZDynamicObject;
 // OutfitApplier.cpp) reachable — behind the gate of OutfitApply on the applying frame. A run token
 // ([command] token, 64 lowercase hex, never logged) makes the link speak protocol version 2 and
 // attest; without it the link is version 1 exactly as C-1.
+//
+// Motion path (M7-B2; glacier-relay docs/design/M7_NETWORK_GHOST.md sections 15 and 17): a third,
+// separate setting, [motion] enabled = false by default. With it on (and the run token), a third
+// outbound loopback client (MotionLink, its own network thread, never a listener, never an engine
+// read) binds to BEAM's motion listener for the current attested command link, and the frame update
+// runs Motion::Controller after the command scheduler: the read-only share of the local hero
+// (player.pose.share/1) and — only with [command] effectful on as well, which alone constructs the
+// transform applier — the destination session (candidate.motion.session/1), whose per-frame checks
+// on the native clock precede the one transform setter call site (EngineTransformApplier::Invoke).
+// With it off nothing of it is constructed and the hello, the allowlist and every M6 path are M6's.
 class GlacierRelay : public IPluginInterface
 {
 public:
@@ -137,6 +149,11 @@ private:
     std::unique_ptr<CommandScheduler> m_CommandScheduler;
     std::unique_ptr<EngineOutfitApplier> m_OutfitApplier; // M5 C-2B; null unless [command] effectful = true
     std::unique_ptr<EngineTransformApplier> m_TransformApplier; // M6-F; null unless [command] effectful = true
+    // M7-B2; both null unless [motion] enabled = true. Declared after the command link so they are
+    // destroyed before it (the motion link's thread reads the command link's generation), the
+    // controller after the link it holds a view of.
+    std::unique_ptr<MotionLink> m_MotionLink;
+    std::unique_ptr<Motion::Controller> m_MotionController;
 
     // M5 C-1 transition instrumentation (only maintained when the command link is enabled; the
     // tee is owned by the adapter's sink chain and this is a non-owning view for its stats).

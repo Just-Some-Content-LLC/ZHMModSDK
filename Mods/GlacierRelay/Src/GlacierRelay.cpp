@@ -131,6 +131,16 @@ void GlacierRelay::OnEngineInitialized()
         const ZString s_Token = GetSetting("command", "token", "");
         s_Command.token = std::string(s_Token.ToStringView());
 
+        // M7-B2: the motion path, a third separate setting (glacier-relay M7 design sections 15 and 17):
+        //   [motion] enabled = false (default)  nothing of it is constructed; the hello, the allowlist
+        //                                       and every M6 path are exactly M6's
+        //   [motion] port = 4750                loopback only; the host is not configurable
+        //   [motion] max_sessions = 1           destination sessions per process (1..4), never reset
+        // With it on (and a run token: the motion link binds only to an attested version-2 command
+        // link), player.pose.share/1 is advertised and decodable; candidate.motion.session/1 only with
+        // [command] effectful on as well, which alone constructs the transform applier.
+        s_Command.motion = GetSettingBool("motion", "enabled", false);
+
         if (s_Command.effectful)
         {
             m_OutfitApplier = std::make_unique<EngineOutfitApplier>();
@@ -145,6 +155,38 @@ void GlacierRelay::OnEngineInitialized()
             RelayLog::Info("command: {} {} on frame {}", p_Result.command_id, CommandProtocol::StatusText(p_Result.status), p_Result.frame ? *p_Result.frame : 0);
             m_CommandLink->PushResult(p_Result);
         });
+
+        if (s_Command.motion)
+        {
+            MotionLink::Options s_Motion;
+            const auto s_MotionPort = GetSettingInt("motion", "port", s_Motion.port);
+            if (s_MotionPort > 0 && s_MotionPort <= 65535)
+                s_Motion.port = static_cast<uint16_t>(s_MotionPort);
+            else
+                RelayLog::Warn("motion port setting {} is out of range; using {}", s_MotionPort, s_Motion.port);
+            s_Motion.token = s_Command.token;
+
+            Motion::Controller::Options s_Controller;
+            s_Controller.effectful = s_Command.effectful;
+            const auto s_MaxSessions = GetSettingInt("motion", "max_sessions", 1);
+            if (s_MaxSessions >= 1 && s_MaxSessions <= 4)
+                s_Controller.max_sessions = static_cast<uint32_t>(s_MaxSessions);
+            else
+                RelayLog::Warn("motion max_sessions setting {} is out of 1..4; using 1", s_MaxSessions);
+
+            m_MotionLink = std::make_unique<MotionLink>(s_Motion, m_Adapter->InstanceId(), [] {
+                return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            }, [this] { return m_CommandLink->AttestedGeneration(); });
+            m_MotionController = std::make_unique<Motion::Controller>(s_Controller, m_MotionLink.get());
+            RelayLog::Info(
+                "motion enabled: link to 127.0.0.1:{}; player.pose.share/1 (read-only){}; max sessions {} per process",
+                s_Motion.port, s_Command.effectful ? ", candidate.motion.session/1 (EFFECTFUL: the per-frame checks before the one SetObjectToWorldMatrixFromEditor call site)" : " (candidate.motion.session/1 not advertised: [command] effectful = false)", s_Controller.max_sessions
+            );
+        }
+        else
+        {
+            RelayLog::Info("motion disabled ([motion] enabled = false, the default)");
+        }
 
         if (s_Command.effectful)
             RelayLog::Info("command link enabled: port {}, allowlist relay.probe/1, relay.inspect.outfit/1, relay.inspect.players/1, relay.inspect.entity/1, relay.inspect.candidate/1, relay.inspect.candidate_transform/1 (read-only), player.outfit.set/2 (EFFECTFUL: one guarded ZHitman5_SetOutfit call behind the applying-frame gate), candidate.transform.set/1 (EFFECTFUL: lift | restore) and candidate.transform.set/2 (EFFECTFUL: step_y | restore; one guarded SetObjectToWorldMatrixFromEditor call on the compiled candidate behind the applying-frame gate and the one-forward ledger shared by both entries), one command per frame; protocol version {}", s_Command.port, m_CommandLink->ProtocolVersion());
@@ -347,6 +389,9 @@ void GlacierRelay::ScheduleCommand(const SceneState& p_Scene, bool p_PlayingBefo
     s_Observation.applier = m_OutfitApplier.get();
     s_Observation.link_generation_now = [this] { return m_CommandLink->LinkGeneration(); };
 
+    // M7-B2: the motion controller (null unless [motion] enabled).
+    s_Observation.motion = m_MotionController.get();
+
     if (!m_CommandThreadLogged)
     {
         m_CommandThreadLogged = true;
@@ -354,6 +399,27 @@ void GlacierRelay::ScheduleCommand(const SceneState& p_Scene, bool p_PlayingBefo
     }
 
     m_CommandScheduler->Tick(s_Observation);
+
+    // M7-B2: the motion step, on this frame, after the frame's own observations and the command
+    // taken this frame (deadlines first, then BEAM's messages, the share's sample and the session's
+    // pending target). The engine is read only through the inspector and the applier, here.
+    if (m_MotionController)
+    {
+        Motion::Frame s_Motion;
+        s_Motion.frame = s_Observation.frame;
+        s_Motion.now_mono_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        s_Motion.clock = [] { return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); };
+        s_Motion.thread_id = s_Observation.thread_id;
+        s_Motion.scene_available = p_Scene.available;
+        s_Motion.scene = p_Scene;
+        s_Motion.mission_playing = s_Observation.mission_playing;
+        s_Motion.mission_generation = m_AttemptSessionId;
+        s_Motion.relay_transition_epoch = m_TransitionEpoch;
+        s_Motion.command_link_generation_now = [this] { return m_CommandLink->LinkGeneration(); };
+        s_Motion.inspector = [this] { return InspectCandidateTransform(); };
+        s_Motion.applier = m_TransformApplier.get();
+        m_MotionController->Step(s_Motion);
+    }
 }
 
 // Queue drops are counted by the detour side; they are reported here, on the frame thread, with a

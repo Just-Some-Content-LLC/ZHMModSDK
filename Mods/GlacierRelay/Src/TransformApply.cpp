@@ -65,6 +65,8 @@ namespace TransformApply
             case Reason::AlreadyRestored: return "already_restored";
             case Reason::EntryModeUnsupported: return "entry_mode_unsupported";
             case Reason::RestoreVersionMismatch: return "restore_version_mismatch";
+            case Reason::MotionSessionHeld: return "motion_session_held";
+            case Reason::RestoreParentNotOpening: return "restore_parent_not_opening";
         }
         return "unknown";
     }
@@ -252,11 +254,52 @@ namespace TransformApply
             }
         }
 
+        // M7-B2: a motion session holds the candidate (the authority's exclusivity, mirrored natively).
+        if (p_Input.motion_holds)
+            s_Fail(Reason::MotionSessionHeld);
+
         // 7. The mandatory result must be representable before any call.
         if (!p_Input.result_capacity_ok)
             s_Fail(Reason::ResultCapacity);
 
         return s_Verdict;
+    }
+
+    std::vector<Reason> IdentityFailures(const Reads& p_Reads)
+    {
+        // Steps 1-3 of EvaluateTransform, verbatim in rule and order (without its entry-mode step).
+        std::vector<Reason> s_Reasons;
+        auto s_Fail = [&](Reason p_Reason) { s_Reasons.push_back(p_Reason); };
+
+        if (!(p_Reads.brick_present.observed() && *p_Reads.brick_present.value))
+            s_Fail(Reason::CandidateBrickAbsent);
+        if (!(p_Reads.lookup.index_check.observed() && *p_Reads.lookup.index_check.value == "in_range"))
+            s_Fail(Reason::CandidateIndexNotInRange);
+        if (!(p_Reads.lookup.resolved.observed() && *p_Reads.lookup.resolved.value))
+            s_Fail(Reason::CandidateUnresolved);
+        if (!(p_Reads.hitman5.observed() && *p_Reads.hitman5.value))
+            s_Fail(Reason::CandidateNotHitman5);
+        if (!(p_Reads.id_match.observed() && *p_Reads.id_match.value))
+            s_Fail(Reason::CandidateIdMismatch);
+        if (!(p_Reads.cand_brick_owner.observed() && *p_Reads.cand_brick_owner.value == p_Reads.brick_id))
+            s_Fail(Reason::CandidateOwnerMismatch);
+        if (!(p_Reads.lookup.same_entity.observed() && !*p_Reads.lookup.same_entity.value))
+            s_Fail(Reason::CandidateNotDistinct);
+
+        const bool s_Resolved = s_Reasons.empty();
+        if (s_Resolved && !(p_Reads.spatial.observed() && *p_Reads.spatial.value))
+            s_Fail(Reason::CandidateSpatialUnavailable);
+        if (s_Resolved && p_Reads.spatial.observed() && *p_Reads.spatial.value && !(p_Reads.spatial_distinct.observed() && *p_Reads.spatial_distinct.value))
+            s_Fail(Reason::CandidateSpatialNotDistinct);
+        if (!p_Reads.candidate_in_registry.observed())
+            s_Fail(Reason::RegistryUnreadable);
+        else if (*p_Reads.candidate_in_registry.value)
+            s_Fail(Reason::CandidateInRegistry);
+
+        if (!(p_Reads.hero.world.observed() && p_Reads.hero.local.observed() && p_Reads.hero.parent.observed()))
+            s_Fail(Reason::HeroControlUnavailable);
+
+        return s_Reasons;
     }
 
     const char* WorldMatchText(WorldMatch p_Match)
@@ -533,7 +576,7 @@ namespace TransformApply
         return CommandProtocol::EncodeResult(s_Probe).size() <= CommandProtocol::k_MaxLineBytes && s_Probe.observed.size() <= CommandProtocol::k_MaxObservedEntries;
     }
 
-    Outcome Apply(const Context& p_Context, ITransformApplier& p_Applier, Ledger& p_Ledger, Result& p_Result)
+    Outcome Apply(const Context& p_Context, ITransformApplier& p_Applier, Ledger& p_Ledger, Result& p_Result, bool p_MotionHolds)
     {
         Outcome s_Outcome;
         const auto& s_Pending = *p_Context.pending;
@@ -593,6 +636,7 @@ namespace TransformApply
         s_GateInput.reads = &s_Reads;
         s_GateInput.ledger = &p_Ledger;
         s_GateInput.link_generation_now = s_LinkNow;
+        s_GateInput.motion_holds = p_MotionHolds;
         GateVerdict s_Gate = EvaluateTransform(s_GateInput);
 
         // M6-G1: the request's entry version must be the decoded command's own (the decoder sets
@@ -819,6 +863,10 @@ namespace TransformApply
             }
             if (s_Control != Control::Unchanged)
                 p_Ledger.Invalidate(std::string("hero control ") + ControlText(s_Control));
+
+            // M7-B2: whether the restore confirmed itself on this frame (the motion exclusion's input).
+            if (s_Request.mode == TransformMode::Restore)
+                p_Ledger.restore_confirmed = s_Outcome.effect == Effect::Changed && s_WorldMatch == WorldMatch::Target && s_Control == Control::Unchanged;
         }
 
         if (p_Applier.Latched() && p_Ledger.state != Ledger::State::Invalidated)
@@ -883,6 +931,344 @@ namespace TransformApply
 
         AppendFacts(p_Result.observed, s_Facts);
 
+        if (Reduce(p_Result))
+            s_Outcome.reduced = true;
+
+        return s_Outcome;
+    }
+
+    PreconditionEvaluator::Verdict CommonGate(const Context& p_Context, const Reads& p_Reads, uint64_t p_LinkNow, bool p_Latched)
+    {
+        const auto& s_Pending = *p_Context.pending;
+        PreconditionEvaluator::Input s_Input;
+        s_Input.transform_gate = true;
+        s_Input.expected_generation = s_Pending.command.mission_generation_precondition;
+        s_Input.generation_at_receipt = s_Pending.at_receipt.mission_generation;
+        s_Input.generation_cached = p_Context.mission_generation;
+        s_Input.generation_fresh = p_Reads.generation_fresh;
+        s_Input.mission_playing = p_Context.mission_playing;
+        s_Input.previous_frame_playing = p_Context.previous_frame_playing;
+        s_Input.frame = p_Context.frame;
+        s_Input.rise_frame = p_Context.rise_frame;
+        s_Input.now_mono_ms = p_Context.now_mono_ms;
+        s_Input.rise_mono_ms = p_Context.rise_mono_ms;
+        s_Input.scene_available = p_Context.scene_available;
+        s_Input.scene_loaded = p_Context.scene.scene_loaded;
+        s_Input.loading_stage = p_Context.scene.loading_stage;
+        s_Input.scene_type = p_Context.scene.scene_type;
+        s_Input.scene_resource_same_as_rise = p_Context.scene_resource_same_as_rise;
+        s_Input.epoch_now = p_Context.relay_transition_epoch;
+        s_Input.epoch_at_receipt = s_Pending.at_receipt.relay_transition_epoch;
+        s_Input.contract_started_seen = p_Context.contract_started_seen;
+        s_Input.contract_ended_seen = p_Context.contract_ended_seen;
+        s_Input.link_generation_unchanged = p_LinkNow != 0 && p_LinkNow == s_Pending.link_generation && p_LinkNow == p_Context.link_generation;
+        s_Input.on_expected_thread = p_Context.expected_thread_id == 0 || p_Context.thread_id == p_Context.expected_thread_id;
+        s_Input.effectful_latched = p_Latched;
+        return PreconditionEvaluator::Evaluate(s_Input, p_Context.rules);
+    }
+
+    Outcome ApplyMotionRestore(const Context& p_Context, ITransformApplier& p_Applier, const MotionRecord* p_Record, bool p_Holds, int64_t p_BudgetRemaining, Result& p_Result, MotionRestoreVerdict& p_Verdict)
+    {
+        Outcome s_Outcome;
+        p_Verdict = MotionRestoreVerdict{};
+        const auto& s_Pending = *p_Context.pending;
+        const auto& s_Command = s_Pending.command;
+
+        if (!s_Command.motion || s_Command.motion->mode != CommandProtocol::MotionSessionMode::Restore || !s_Command.motion->target_world || !s_Command.motion->restore_of)
+        {
+            p_Result.status = Status::Rejected;
+            p_Result.reason = "motion restore request missing";
+            return s_Outcome;
+        }
+
+        const auto& s_Motion = *s_Command.motion;
+        const Words12 s_Target = *s_Motion.target_world;
+
+        // The request as the shared result encoding sees it: a restore, never an M6 operation (the M6
+        // ledger is neither read nor written here).
+        TransformRequest s_Request;
+        s_Request.mode = TransformMode::Restore;
+        s_Request.version = 1;
+        s_Request.expect_world = s_Motion.expect_world;
+        s_Request.expect_local = s_Motion.expect_local;
+        s_Request.expect_parent = s_Motion.expect_parent;
+        s_Request.target_world = s_Target;
+        s_Request.restore_of = s_Motion.restore_of;
+
+        const bool s_Latched = p_Applier.Latched();
+        Reads s_Reads = s_Latched ? TransformObservation::AllUnavailable(FieldStatus::Unavailable, "effectful path latched") : p_Applier.Observe();
+
+        const uint64_t s_Age = p_Context.now_mono_ms >= s_Pending.received_mono_ms ? p_Context.now_mono_ms - s_Pending.received_mono_ms : 0;
+        const uint64_t s_LinkNow = p_Context.link_generation_now ? p_Context.link_generation_now() : p_Context.link_generation;
+        const auto s_Common = CommonGate(p_Context, s_Reads, s_LinkNow, s_Latched || p_Applier.Latched());
+
+        // The motion restore's gate: the identity, the preimage against the fresh expectation, the
+        // target, the record, the exclusion and the capacity — every failed rule, in this order.
+        std::vector<Reason> s_Reasons = IdentityFailures(s_Reads);
+        const Snapshot& s_Pre = s_Reads.candidate;
+        const bool s_PreReadable = s_Pre.world.observed() && s_Pre.local.observed() && s_Pre.parent.observed() && s_Pre.dirty.observed();
+        if (!s_PreReadable)
+        {
+            if (s_Reads.spatial.observed() && *s_Reads.spatial.value)
+                s_Reasons.push_back(Reason::PreimageUnavailable);
+        }
+        else
+        {
+            if (*s_Pre.dirty.value)
+                s_Reasons.push_back(Reason::PreimageDirty);
+            if (*s_Pre.world.value != s_Motion.expect_world)
+                s_Reasons.push_back(Reason::ExpectWorldMismatch);
+            if (*s_Pre.local.value != s_Motion.expect_local)
+                s_Reasons.push_back(Reason::ExpectLocalMismatch);
+            if (*s_Pre.parent.value != s_Motion.expect_parent)
+                s_Reasons.push_back(Reason::ExpectParentMismatch);
+        }
+        if (!FloatWords::AllFinite(s_Target))
+            s_Reasons.push_back(Reason::TargetNotFinite);
+        if (s_PreReadable && s_Target == *s_Pre.world.value)
+            s_Reasons.push_back(Reason::TargetEqualsCurrent);
+
+        if (!p_Record || (!p_Record->restorable && !p_Record->restored && !p_Record->invalidated))
+        {
+            s_Reasons.push_back(Reason::OperationRecordMissing);
+        }
+        else
+        {
+            if (p_Record->invalidated)
+                s_Reasons.push_back(Reason::OperationRecordInvalidated);
+            if (p_Record->restored)
+                s_Reasons.push_back(Reason::AlreadyRestored);
+            if (*s_Motion.restore_of != p_Record->open_command_id)
+                s_Reasons.push_back(Reason::OperationRecordMismatch);
+            if (s_Target != p_Record->opening_world)
+                s_Reasons.push_back(Reason::RestoreTargetMismatch);
+            if (s_LinkNow == 0 || s_LinkNow != p_Record->command_link_generation)
+                s_Reasons.push_back(Reason::RestoreLinkChanged);
+            if (!(s_Reads.generation_fresh.observed() && *s_Reads.generation_fresh.value == p_Record->mission_generation))
+                s_Reasons.push_back(Reason::RestoreGenerationChanged);
+            if (s_PreReadable && *s_Pre.world.value != p_Record->final_world)
+                s_Reasons.push_back(Reason::CurrentNotPostimage);
+            if (s_PreReadable && *s_Pre.parent.value != p_Record->opening_parent)
+                s_Reasons.push_back(Reason::RestoreParentNotOpening);
+        }
+
+        if (p_Holds)
+            s_Reasons.push_back(Reason::MotionSessionHeld);
+
+        {
+            Result s_Base = p_Result;
+            if (!MandatoryResultFits(s_Base, s_Reads, s_Request, s_Target))
+                s_Reasons.push_back(Reason::ResultCapacity);
+        }
+
+        const bool s_Ok = s_Common.ok && s_Reasons.empty();
+        s_Outcome.precondition_ok = s_Ok;
+
+        OutfitApply::CallOutcome s_Call;
+        Reads s_Post;
+        bool s_PostRead = false;
+        bool s_LinkChangedAtCall = false;
+        bool s_ApplyLogAttempted = false;
+        RelayLog::WriteOutcome s_ApplyLog;
+
+        if (s_Ok)
+        {
+            const uint64_t s_LinkAtCall = p_Context.link_generation_now ? p_Context.link_generation_now() : p_Context.link_generation;
+            if (s_LinkAtCall != s_Pending.link_generation)
+            {
+                s_LinkChangedAtCall = true;
+            }
+            else
+            {
+                s_ApplyLogAttempted = true;
+                s_ApplyLog = RelayLog::InfoChecked(
+                    "command: {} applying candidate.motion.session/1 mode restore on frame {}: candidate {} in {}; session {} restore_of {}; generation expected {} fresh {}; epoch {}; link generation {}; preimage world {} local {} parent {} dirty 0; target world {}",
+                    s_Command.command_id, p_Context.frame, s_Reads.entity_id, s_Reads.brick_id, s_Motion.session_id, *s_Motion.restore_of,
+                    s_Command.mission_generation_precondition ? *s_Command.mission_generation_precondition : "?",
+                    s_Reads.generation_fresh.observed() ? *s_Reads.generation_fresh.value : "?",
+                    p_Context.relay_transition_epoch, s_LinkAtCall,
+                    FloatWords::Encode(*s_Pre.world.value), FloatWords::Encode(*s_Pre.local.value), *s_Pre.parent.value, FloatWords::Encode(s_Target)
+                );
+
+                if (s_ApplyLog.status == RelayLog::WriteStatus::Written)
+                {
+                    s_Call = p_Applier.Invoke(s_Target);
+                    s_Post = p_Applier.ReadBack();
+                    s_PostRead = true;
+                }
+            }
+        }
+
+        const bool s_ApplyLogUnwritten = s_ApplyLogAttempted && s_ApplyLog.status != RelayLog::WriteStatus::Written;
+        p_Applier.Release();
+
+        WorldMatch s_WorldMatch = WorldMatch::Unavailable;
+        LocalMatch s_LocalMatch = LocalMatch::Unavailable;
+        Control s_Control = Control::Unavailable;
+        if (s_PostRead)
+        {
+            s_WorldMatch = ClassifyWorld(s_Post.candidate, *s_Pre.world.value, s_Target);
+            s_LocalMatch = ClassifyLocal(s_Post.candidate, *s_Pre.local.value);
+            s_Control = ClassifyControl(s_Reads.hero, s_Post.hero);
+        }
+
+        std::string s_Reasons_Text = PreconditionEvaluator::ReasonsText(s_Common);
+        if (!s_Reasons.empty())
+            s_Reasons_Text += (s_Reasons_Text.empty() ? "" : ",") + ReasonsText(s_Reasons);
+
+        if (!s_Ok)
+        {
+            bool s_Unavailable = false;
+            for (const auto s_Reason : s_Common.reasons)
+                if (PreconditionEvaluator::IsUnavailability(s_Reason))
+                    s_Unavailable = true;
+            for (const auto s_Reason : s_Reasons)
+                if (IsUnavailability(s_Reason))
+                    s_Unavailable = true;
+            p_Result.status = s_Unavailable ? Status::Unavailable : Status::PreconditionFailed;
+            p_Result.reason = (s_Unavailable ? "not applied (unavailable): " : "not applied (precondition failed): ") + s_Reasons_Text;
+        }
+        else if (s_LinkChangedAtCall)
+        {
+            p_Result.status = Status::Unavailable;
+            p_Result.reason = "not applied (unavailable): link_generation_changed immediately before the call";
+        }
+        else if (s_ApplyLogUnwritten)
+        {
+            p_Result.status = Status::Unavailable;
+            p_Result.reason = fmt::format(
+                "not applied (unavailable): apply_log_unwritten ({}: {} of {} bytes accepted, error {}); the setter was not called",
+                RelayLog::WriteStatusText(s_ApplyLog.status), s_ApplyLog.written, s_ApplyLog.requested, s_ApplyLog.error
+            );
+        }
+        else if (s_Call.faulted)
+        {
+            s_Outcome.invocation = Invocation::Faulted;
+            s_Outcome.effect = Effect::Uncertain;
+            p_Result.status = Status::Failed;
+            p_Result.reason = "fault inside the setter; effect uncertain (possible effect; later observation required)";
+        }
+        else if (!s_Call.called)
+        {
+            p_Result.status = Status::Unavailable;
+            p_Result.reason = "not applied (unavailable): the setter or its references were not available at the call";
+        }
+        else
+        {
+            s_Outcome.invocation = Invocation::Called;
+            p_Result.status = Status::Applied;
+            const bool s_GenerationHeld = s_Post.generation_fresh.observed() && s_Reads.generation_fresh.observed() && *s_Post.generation_fresh.value == *s_Reads.generation_fresh.value;
+            const bool s_SameEntity = s_Post.same_entity_as_before.observed() && *s_Post.same_entity_as_before.value;
+            const bool s_ParentHeld = s_Post.candidate.parent.observed() && *s_Post.candidate.parent.value == *s_Pre.parent.value;
+            std::string s_Note;
+
+            if (s_WorldMatch == WorldMatch::Unavailable)
+            {
+                s_Outcome.effect = Effect::Uncertain;
+                s_Note = "setter returned; read-back unavailable (possible effect; later observation required)";
+            }
+            else if (!s_GenerationHeld)
+            {
+                s_Outcome.effect = Effect::Uncertain;
+                s_Note = "setter returned; the registry generation changed or was unreadable after the call";
+            }
+            else if (!s_SameEntity)
+            {
+                s_Outcome.effect = Effect::Uncertain;
+                s_Note = "setter returned; the post read did not resolve the same entity";
+            }
+            else if (!s_ParentHeld)
+            {
+                s_Outcome.effect = Effect::Uncertain;
+                s_Note = "setter returned; the parent changed after the call";
+            }
+            else if (s_WorldMatch == WorldMatch::IndeterminateDirty)
+            {
+                s_Outcome.effect = Effect::Uncertain;
+                s_Note = "setter returned; the post-call cache is dirty: indeterminate (the stored words establish neither the target nor the baseline)";
+            }
+            else if (s_WorldMatch == WorldMatch::Target)
+            {
+                s_Outcome.effect = Effect::Changed;
+                s_Note = "setter returned; all twelve world words equal the session's opening preimage (native read-back, same frame)";
+            }
+            else if (s_WorldMatch == WorldMatch::Preimage)
+            {
+                s_Outcome.effect = Effect::Unchanged;
+                s_Note = "setter returned; all twelve world words equal the pre-call words (no confirmed change)";
+            }
+            else
+            {
+                s_Outcome.effect = Effect::Uncertain;
+                s_Note = "setter returned; the world words match neither the pre-call words nor the requested preimage";
+            }
+
+            if (s_Control != Control::Unchanged)
+                s_Note += "; hero control " + std::string(ControlText(s_Control));
+            p_Result.reason = s_Note;
+        }
+
+        // The record's transition (the controller applies it): any invocation is an attempted
+        // restoration; only every same-frame fact of section 17.2 makes it a restoration; anything
+        // less invalidates the record for good (no second restore, no baseline release).
+        p_Verdict.invoked = s_Call.called || s_Call.faulted;
+        p_Verdict.restored = s_Call.called && !s_Call.faulted && s_Outcome.effect == Effect::Changed && s_WorldMatch == WorldMatch::Target
+            && s_Control == Control::Unchanged && s_PostRead && s_Post.candidate.local.observed();
+        p_Verdict.invalidate = p_Verdict.invoked && !p_Verdict.restored;
+
+        Facts s_Facts;
+        s_Facts.mode = "restore";
+        s_Facts.mission_playing = p_Context.mission_playing;
+        s_Facts.scene_type = p_Context.scene_available ? Field<std::string>::Observed(p_Context.scene.scene_type) : Field<std::string>::Of(FieldStatus::Unavailable, "scene state unavailable");
+        s_Facts.receipt_to_frame_ms = static_cast<int64_t>(s_Age);
+        s_Facts.generation_expected = Known(s_Command.mission_generation_precondition, "not supplied by the command");
+        s_Facts.generation_at_receipt = Known(s_Pending.at_receipt.mission_generation, "no open attempt at receipt");
+        s_Facts.generation_cached = Known(p_Context.mission_generation, "no open attempt");
+        s_Facts.generation_fresh = s_Reads.generation_fresh;
+        s_Facts.generation_post = s_PostRead ? s_Post.generation_fresh : Field<std::string>::Of(FieldStatus::Unavailable, "no call made");
+        s_Facts.epoch = static_cast<int64_t>(p_Context.relay_transition_epoch);
+        s_Facts.epoch_at_receipt = static_cast<int64_t>(s_Pending.at_receipt.relay_transition_epoch);
+        s_Facts.reads = &s_Reads;
+        s_Facts.preimage = s_Reads.candidate;
+        s_Facts.requested = Field<Words12>::Observed(s_Target);
+        if (s_PostRead)
+        {
+            s_Facts.postimage = s_Post.candidate;
+            s_Facts.post_same_entity = s_Post.same_entity_as_before;
+        }
+        else
+        {
+            TransformObservation::MarkSnapshot(s_Facts.postimage, FieldStatus::Unavailable, "no call made");
+            s_Facts.post_same_entity = Field<bool>::Of(FieldStatus::Unavailable, "no call made");
+        }
+        s_Facts.world_match = Field<std::string>::Observed(WorldMatchText(s_WorldMatch));
+        s_Facts.local_match = Field<std::string>::Observed(LocalMatchText(s_LocalMatch));
+        s_Facts.hero_control = Field<std::string>::Observed(ControlText(s_Control));
+        s_Facts.restore_of = Field<std::string>::Observed(*s_Motion.restore_of);
+        if (s_PostRead && p_Record)
+        {
+            Ledger s_View;
+            s_View.preimage_world = p_Record->opening_world;
+            s_View.preimage_local = p_Record->opening_local;
+            s_View.preimage_parent = p_Record->opening_parent;
+            const std::string s_RestoreFacts = RestoreFacts(s_Post.candidate, s_View);
+            s_Facts.restore_facts = s_RestoreFacts.empty() ? Field<std::string>::Of(FieldStatus::Unavailable, "post read unavailable") : Field<std::string>::Observed(s_RestoreFacts);
+        }
+        else
+        {
+            s_Facts.restore_facts = Field<std::string>::Of(FieldStatus::Unavailable, "no call made");
+        }
+        s_Facts.link_generation_at_call = static_cast<int64_t>(s_LinkNow);
+        s_Facts.setter_called = s_Call.called;
+        s_Facts.apply_log = s_ApplyLogAttempted ? RelayLog::WriteStatusText(s_ApplyLog.status) : "not_attempted";
+        s_Facts.invocation = OutfitApply::InvocationText(s_Outcome.invocation);
+        s_Facts.effect = OutfitApply::EffectText(s_Outcome.effect);
+        s_Facts.precondition_ok = s_Ok;
+        s_Facts.precondition_reasons = s_Ok ? Field<std::string>::Of(FieldStatus::Observed, "") : Field<std::string>::Observed(s_Reasons_Text);
+        s_Facts.budget_remaining = p_BudgetRemaining;
+        s_Facts.reads_on_frame = s_Latched ? Field<bool>::Of(FieldStatus::Unavailable, "effectful path latched") : Field<bool>::Observed(s_Reads.thread_id == p_Context.thread_id);
+
+        AppendFacts(p_Result.observed, s_Facts);
         if (Reduce(p_Result))
             s_Outcome.reduced = true;
 
