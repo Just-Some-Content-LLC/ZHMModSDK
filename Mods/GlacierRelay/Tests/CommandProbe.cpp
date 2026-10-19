@@ -732,6 +732,7 @@ namespace
         std::vector<Inbound> Drain() override { return m_Link.Drain(); }
         uint64_t Signals() const override { return m_Link.Signals(); }
         Queued SendControl(uint64_t p_Serial, std::string p_Line) override { return Record("control", m_Link.SendControl(p_Serial, p_Line), p_Line); }
+        size_t ControlRoom() const override { return m_Link.ControlRoom(); }
         Queued SendSample(uint64_t p_Serial, std::string p_Line) override { return Record("sample", m_Link.SendSample(p_Serial, p_Line), p_Line); }
         void Drop(uint64_t p_Serial, const char* p_Reason) override
         {

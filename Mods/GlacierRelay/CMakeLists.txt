@@ -125,6 +125,7 @@ add_executable(GlacierRelayTests
         Tests/MotionSessionTests.cpp
         Tests/MotionRestoreTests.cpp
         Tests/MotionShareTests.cpp
+        Tests/MotionVerifierTests.cpp
         Tests/MotionTestRig.h
         Tests/TestListener.h
         Tests/ContractLifecycleTests.cpp

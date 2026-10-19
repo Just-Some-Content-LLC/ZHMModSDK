@@ -605,7 +605,9 @@ namespace
             s_Rig.link.binding.bound = false;
             s_Rig.Step();
             CHECK(!s_Rig.C().SessionOpen() && s_Rig.applier.invokes == 0 && s_Rig.Closeds().empty() && s_Rig.C().GetStats().last_session_close == "motion_link_lost");
-            CHECK(s_Rig.C().Record() && s_Rig.C().Record()->restorable); // native-clean; BEAM sees the loss (unknown) and never restores it
+            // unreported: BEAM sees the loss (unknown) and never restores or releases it, so neither
+            // does the native record (verifier F6; the draft kept it restorable)
+            CHECK(s_Rig.C().Record() && !s_Rig.C().Record()->restorable && s_Rig.C().Record()->invalidated);
         }
         {
             // a reconnect is a new binding: the old session never resumes on it
@@ -686,18 +688,20 @@ namespace
 
     void Evidence()
     {
-        // Required evidence that cannot be queued: no further writes; the binding is dropped.
+        // Required evidence that cannot be queued: no call at all (its acknowledgement could not be
+        // reported — verifier F5 on the draft, which made the call and then dropped the link); the
+        // binding is dropped and the session ends.
         {
             Rig s_Rig;
             Opened(s_Rig);
             s_Rig.Target(1, s_Rig.At(0.05, 0.0));
             s_Rig.link.control_room = 0;
             s_Rig.Step();
-            CHECK(s_Rig.applier.invokes == 1 && !s_Rig.link.drops.empty() && s_Rig.C().GetStats().control_full >= 1);
+            CHECK(s_Rig.applier.invokes == 0 && !s_Rig.link.drops.empty() && s_Rig.C().GetStats().evidence_capacity == 1);
             CHECK(!s_Rig.C().SessionOpen() && s_Rig.C().GetStats().last_session_close == "evidence_undeliverable");
             s_Rig.Target(2, s_Rig.At(0.1, 0.0));
             s_Rig.Step(50);
-            CHECK(s_Rig.applier.invokes == 1);
+            CHECK(s_Rig.applier.invokes == 0 && s_Rig.C().GetStats().late_targets == 1); // a closed session never applies
         }
         {
             // a report that cannot be queued ends the session at once

@@ -65,6 +65,7 @@ namespace MotionTest
             control.push_back(std::move(p_Line));
             return Queued::Queued;
         }
+        size_t ControlRoom() const override { return binding.bound ? control_room : 0; }
         Queued SendSample(uint64_t p_Serial, std::string p_Line) override
         {
             if (!binding.bound || p_Serial != binding.serial)

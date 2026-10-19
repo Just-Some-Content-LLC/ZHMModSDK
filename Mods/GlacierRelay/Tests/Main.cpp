@@ -30,6 +30,7 @@ void RunMotionLinkTests();
 void RunMotionSessionTests();
 void RunMotionRestoreTests();
 void RunMotionShareTests();
+void RunMotionVerifierTests();
 
 int main()
 {
@@ -63,6 +64,7 @@ int main()
     RunMotionSessionTests();
     RunMotionRestoreTests();
     RunMotionShareTests();
+    RunMotionVerifierTests();
 
     if (g_Failures == 0)
         std::printf("GlacierRelayTests: all checks passed\n");
