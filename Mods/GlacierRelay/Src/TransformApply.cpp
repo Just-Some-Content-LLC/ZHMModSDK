@@ -1090,7 +1090,14 @@ namespace TransformApply
                     FloatWords::Encode(*s_Pre.world.value), FloatWords::Encode(*s_Pre.local.value), *s_Pre.parent.value, FloatWords::Encode(s_Target)
                 );
 
-                if (s_ApplyLog.status == RelayLog::WriteStatus::Written)
+                // the command link re-read once more after that potentially blocking write, immediately
+                // before the call (verifier F4; the session path does the same)
+                const uint64_t s_LinkAfterLog = s_ApplyLog.status == RelayLog::WriteStatus::Written ? (p_Context.link_generation_now ? p_Context.link_generation_now() : p_Context.link_generation) : 0;
+                if (s_ApplyLog.status == RelayLog::WriteStatus::Written && s_LinkAfterLog != s_Pending.link_generation)
+                {
+                    s_LinkChangedAtCall = true;
+                }
+                else if (s_ApplyLog.status == RelayLog::WriteStatus::Written)
                 {
                     s_Call = p_Applier.Invoke(s_Target);
                     s_Post = p_Applier.ReadBack();

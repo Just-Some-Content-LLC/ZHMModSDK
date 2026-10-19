@@ -127,6 +127,8 @@ namespace Motion
             uint64_t control_full = 0;        // a required evidence line that could not be queued (link dropped)
             uint64_t deadline_at_call = 0;    // a target refused by the re-check after the pre-call log
             uint64_t cancelled_at_call = 0;   // a close or link loss seen by that re-check
+            uint64_t late_stamped_targets = 0; // a target stamped at or after a deadline (never accepted; verifier F1)
+            uint64_t evidence_capacity = 0;   // a call not made because its evidence could not be queued (verifier F5)
             // records, exclusion, restoration
             uint64_t m6_held = 0;             // M6 transform commands refused by the exclusion
             uint64_t released_at_baseline = 0;
@@ -238,6 +240,7 @@ namespace Motion
         void CloseSession(const Frame& p_Frame, const std::string& p_Reason, bool p_Send);
         void Ack(const Frame& p_Frame, const Pending& p_Target, MotionProtocol::Outcome p_Outcome, const std::string& p_Reason, std::optional<std::pair<uint32_t, uint32_t>> p_Post, std::optional<bool> p_Exact, uint64_t p_NativeMs);
         bool Control(const std::string& p_Line);
+        void Condemn(uint64_t p_Serial, const char* p_Why);
         void OpenSession(const TransformApply::Context& p_Context, TransformApply::ITransformApplier* p_Applier, const TransformApply::Ledger& p_M6, const std::function<TransformObservation::Reads()>& p_Inspector, CommandProtocol::Result& p_Result);
         void RestoreSession(const TransformApply::Context& p_Context, TransformApply::ITransformApplier* p_Applier, CommandProtocol::Result& p_Result);
         bool RecordAtBaseline(const TransformObservation::Reads& p_Reads) const;
@@ -248,7 +251,8 @@ namespace Motion
         IMotionLink* m_Link;
         Stats m_Stats;
         bool m_InvokedOnce = false;
-        bool m_EvidenceLost = false; // a required control line of the open session could not be queued
+        bool m_EvidenceLost = false;     // a required control line of the open session could not be queued
+        uint64_t m_CondemnedSerial = 0;  // a binding whose drop this controller requested: nothing more happens on it (verifier F2)
         std::optional<ShareState> m_Share;
         std::optional<SessionState> m_Session;
         std::optional<TransformApply::MotionRecord> m_Record; // the retained record of the last session, until released

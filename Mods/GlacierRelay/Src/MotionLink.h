@@ -91,6 +91,10 @@ public:
     // immediately before a setter call cannot miss a cancellation that arrived in between.
     virtual uint64_t Signals() const = 0;
     virtual Queued SendControl(uint64_t p_Serial, std::string p_Line) = 0;
+    // The control lines the bound connection still accepts (0 when not bound): the frame thread makes
+    // a setter call only when the call's own evidence (its acknowledgement and a close) can be queued.
+    // Only the frame thread queues control lines, so the room cannot shrink between this read and its push.
+    virtual size_t ControlRoom() const = 0;
     virtual Queued SendSample(uint64_t p_Serial, std::string p_Line) = 0;
     virtual void Drop(uint64_t p_Serial, const char* p_Reason) = 0; // the frame thread cannot deliver required evidence: end this binding
 };
@@ -107,6 +111,7 @@ public:
         uint32_t send_timeout_ms = 200;     // the motion link's send deadline (section 15.6)
         uint32_t backoff_initial_ms = 1000;
         uint32_t backoff_max_ms = 30000;
+        uint32_t stable_ms = 5000;          // a binding counts as stable, resetting the backoff, after this long (M5 N4)
         uint32_t poll_ms = 5;               // the read wait between writes
         int send_buffer_bytes = 0;          // 0: the system default (the tests set a small one to fill a socket)
         std::string token;                  // [command] token: 64 lowercase hex; never logged
@@ -115,6 +120,7 @@ public:
     static constexpr size_t k_InboundCapacity = 16;
     static constexpr size_t k_ControlCapacity = 32;
     static constexpr size_t k_SampleCapacity = 8;
+    static constexpr size_t k_FlushBurst = 4; // lines written between two reads (a close is never stuck behind a long flush)
 
     struct Stats
     {
@@ -144,6 +150,8 @@ public:
         uint64_t drop_requests = 0;
         uint64_t command_link_changes = 0;
         uint64_t reconnect_waits = 0;
+        uint32_t current_backoff_ms = 0;  // the wait the next reconnect would take
+        uint64_t stable_bindings = 0;     // bindings that stayed bound for stable_ms (the backoff reset)
         uint32_t network_thread_id = 0;
         std::string last_disconnect;
         std::string last_refusal;
@@ -163,6 +171,7 @@ public:
     std::vector<Inbound> Drain() override;
     uint64_t Signals() const override { return m_Signals.load(); }
     Queued SendControl(uint64_t p_Serial, std::string p_Line) override;
+    size_t ControlRoom() const override;
     Queued SendSample(uint64_t p_Serial, std::string p_Line) override;
     void Drop(uint64_t p_Serial, const char* p_Reason) override;
 

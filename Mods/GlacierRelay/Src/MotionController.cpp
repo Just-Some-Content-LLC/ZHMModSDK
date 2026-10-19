@@ -1,5 +1,6 @@
 #include "MotionController.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include <fmt/format.h>
@@ -101,6 +102,15 @@ namespace Motion
 
     // ---- evidence lines ----------------------------------------------------------------------------
 
+    void Controller::Condemn(uint64_t p_Serial, const char* p_Why)
+    {
+        // The binding is given up: the link thread drops it, and from now on this controller makes no
+        // setter call, admits nothing and sends nothing on it (verifier F2).
+        m_CondemnedSerial = p_Serial;
+        if (m_Link)
+            m_Link->Drop(p_Serial, p_Why);
+    }
+
     bool Controller::Control(const std::string& p_Line)
     {
         if (!m_Link || !m_Session)
@@ -117,7 +127,7 @@ namespace Motion
         if (s_Queued == IMotionLink::Queued::Full)
         {
             ++m_Stats.control_full;
-            m_Link->Drop(m_Session->serial, "required motion evidence could not be queued (control queue full)");
+            Condemn(m_Session->serial, "required motion evidence could not be queued (control queue full)");
         }
         return false;
     }
@@ -174,9 +184,9 @@ namespace Motion
         std::vector<std::string> s_Reasons;
         bool s_Unavailable = false;
 
-        if (!s_Binding.bound)
+        if (!s_Binding.bound || s_Binding.serial == m_CondemnedSerial)
         {
-            s_Reasons.push_back("motion_link_not_bound");
+            s_Reasons.push_back(s_Binding.bound ? "motion_link_condemned" : "motion_link_not_bound");
             s_Unavailable = true;
         }
         else
@@ -280,7 +290,7 @@ namespace Motion
             if (s_Queued == IMotionLink::Queued::Full)
             {
                 ++m_Stats.control_full;
-                m_Link->Drop(s_Share.serial, "share.closed could not be queued (control queue full)");
+                Condemn(s_Share.serial, "share.closed could not be queued (control queue full)");
             }
         }
 
@@ -436,9 +446,9 @@ namespace Motion
             s_Reasons.push_back("applier_unavailable");
             s_Unavailable = true;
         }
-        if (!s_Binding.bound)
+        if (!s_Binding.bound || s_Binding.serial == m_CondemnedSerial)
         {
-            s_Reasons.push_back("motion_link_not_bound");
+            s_Reasons.push_back(s_Binding.bound ? "motion_link_condemned" : "motion_link_not_bound");
             s_Unavailable = true;
         }
         else
@@ -638,7 +648,9 @@ namespace Motion
         // The signal count is read BEFORE the drain: a cancellation queued after the drain changes it.
         const uint64_t s_Signals = m_Link ? m_Link->Signals() : 0;
         const std::vector<IMotionLink::Inbound> s_Inbound = m_Link ? m_Link->Drain() : std::vector<IMotionLink::Inbound>{};
-        const uint64_t s_Now = p_Frame.now_mono_ms;
+        // The processing time is read AFTER the drain (verifier F1): every message drained was stamped
+        // no later than this, so a target stamped at or after a deadline meets the deadline first.
+        const uint64_t s_Now = std::max(p_Frame.now_mono_ms, Now(p_Frame));
         const IMotionLink::Binding s_Binding = m_Link ? m_Link->Current() : IMotionLink::Binding{};
         const uint64_t s_CommandNow = p_Frame.command_link_generation_now ? p_Frame.command_link_generation_now() : 0;
 
@@ -660,6 +672,8 @@ namespace Motion
             const SessionState& s_Session = *m_Session;
             if (!s_Binding.bound || s_Binding.serial != s_Session.serial)
                 CloseSession(p_Frame, "motion_link_lost", false);
+            else if (s_Session.serial == m_CondemnedSerial)
+                CloseSession(p_Frame, "evidence_undeliverable", false);
             else if (s_CommandNow != s_Session.command_generation)
                 CloseSession(p_Frame, "command_link_lost", true);
             else if (p_Frame.thread_id != s_Session.thread_id)
@@ -674,8 +688,8 @@ namespace Motion
         if (m_Share)
         {
             const ShareState& s_Share = *m_Share;
-            if (!s_Binding.bound || s_Binding.serial != s_Share.serial)
-                CloseShare("motion_link_lost", std::string(), false);
+            if (!s_Binding.bound || s_Binding.serial != s_Share.serial || s_Share.serial == m_CondemnedSerial)
+                CloseShare(s_Share.serial == m_CondemnedSerial ? "evidence_undeliverable" : "motion_link_lost", std::string(), false);
             else if (s_CommandNow != s_Share.command_generation)
                 CloseShare("command_link_lost", std::string(), true);
             else
@@ -692,14 +706,15 @@ namespace Motion
         // 4. The share's sample for this frame, if one is due.
         StepShare(p_Frame);
 
-        // 5. The session's pending target, then its report.
-        if (m_Session && !m_EvidenceLost)
+        // 5. The session's pending target, then its report — never on a binding given up this frame (F2).
+        const auto s_Usable = [&] { return m_Session && !m_EvidenceLost && m_Session->serial != m_CondemnedSerial; };
+        if (s_Usable())
             ApplyPending(p_Frame, s_Signals);
-        if (m_Session && !m_EvidenceLost)
+        if (s_Usable())
             MaybeReport(p_Frame);
 
         // 6. Evidence that could not be queued this frame ends the session now (nothing can be sent).
-        if (m_Session && m_EvidenceLost)
+        if (m_Session && !s_Usable())
             CloseSession(p_Frame, "evidence_undeliverable", false);
     }
 
@@ -762,6 +777,18 @@ namespace Motion
             }
 
             SessionState& s_Session = *m_Session;
+
+            // A target stamped at or after a deadline never refreshes it (verifier F1): the deadline
+            // applies first and the target is late (never accepted, never acknowledged as applied).
+            const bool s_AfterDuration = s_Item.received_mono_ms >= s_Session.opened_ms + s_Session.limits.duration_ms;
+            if (s_AfterDuration || s_Item.received_mono_ms >= s_Session.silence_ref_ms + s_Session.limits.silence_close_ms)
+            {
+                ++m_Stats.late_stamped_targets;
+                ++m_Stats.late_targets;
+                CloseSession(p_Frame, s_AfterDuration ? "duration" : "target_silence", true);
+                continue;
+            }
+
             ++s_Session.counts.received;
             ++m_Stats.targets_received;
             const Pending s_Target{s_Message.seq, s_Message.x, s_Message.y, s_Item.received_mono_ms};
@@ -886,6 +913,17 @@ namespace Motion
         s_Requested.w[k_WordX] = s_Target.x;
         s_Requested.w[k_WordY] = s_Target.y;
 
+        // A call only when its own evidence can be queued — its acknowledgement and a close (verifier
+        // F5). Only this thread queues control lines, so the room cannot shrink before they are queued.
+        if (m_Link && m_Link->ControlRoom() < 2)
+        {
+            ++m_Stats.evidence_capacity;
+            s_Applier->Release();
+            Condemn(s_Session.serial, "no room for a call's evidence in the control queue");
+            CloseSession(p_Frame, "evidence_undeliverable", false);
+            return;
+        }
+
         // The checked pre-call line: no call unless the operating system accepted it in full.
         const auto s_Log = RelayLog::InfoChecked(
             "motion: session {} applying target {} on frame {}: candidate {} in {}; x,y {} -> {}; reference seq {}; motion link generation {} serial {}, command link generation {}; generation {}",
@@ -897,19 +935,8 @@ namespace Motion
         if (s_Log.status != RelayLog::WriteStatus::Written)
             return s_Refuse(std::string("apply_log_unwritten:") + RelayLog::WriteStatusText(s_Log.status));
 
-        // Again, after that potentially blocking write and immediately before the call: the clock,
-        // the cancellations, both bindings and the latch.
-        const uint64_t s_AtCall = Now(p_Frame);
-        if (s_AtCall >= s_Session.opened_ms + s_Session.limits.duration_ms)
-        {
-            ++m_Stats.deadline_at_call;
-            return s_Refuse("deadline_at_call:duration", "duration");
-        }
-        if (s_AtCall >= s_Session.silence_ref_ms + s_Session.limits.silence_close_ms)
-        {
-            ++m_Stats.deadline_at_call;
-            return s_Refuse("deadline_at_call:target_silence", "target_silence");
-        }
+        // Again, after that potentially blocking write and immediately before the call: the
+        // cancellations, both bindings, the latch and — last (verifier F7) — the clock.
         if (m_Link && m_Link->Signals() != p_SignalsAtDrain)
         {
             // A close or a binding end arrived since this frame's drain: handle it first; the target
@@ -937,6 +964,17 @@ namespace Motion
         }
         if (s_Applier->Latched())
             return s_Refuse("effectful_latched");
+        const uint64_t s_AtCall = Now(p_Frame);
+        if (s_AtCall >= s_Session.opened_ms + s_Session.limits.duration_ms)
+        {
+            ++m_Stats.deadline_at_call;
+            return s_Refuse("deadline_at_call:duration", "duration");
+        }
+        if (s_AtCall >= s_Session.silence_ref_ms + s_Session.limits.silence_close_ms)
+        {
+            ++m_Stats.deadline_at_call;
+            return s_Refuse("deadline_at_call:target_silence", "target_silence");
+        }
 
         // The one call (EngineTransformApplier::Invoke: the one SetObjectToWorldMatrixFromEditor site).
         const auto s_Call = s_Applier->Invoke(s_Requested);
@@ -1037,12 +1075,17 @@ namespace Motion
 
         // The qualified final snapshot (read-only, this frame): a dirty, unreadable or unqualified one
         // is null and makes the close unclean — never a clean restoration boundary.
+        SessionState& s_Session = *m_Session;
         const Reads s_Final = ReadOnly(p_Frame.inspector);
         std::optional<FloatWords::Words12> s_FinalWorld;
-        if (TransformApply::IdentityFailures(s_Final).empty() && Readable(s_Final.candidate) && !*s_Final.candidate.dirty.value)
+        // qualified only as the session's own candidate: its identity, a readable clean snapshot, the
+        // session's generation, its opening parent and its local hero (verifier F3)
+        if (TransformApply::IdentityFailures(s_Final).empty() && Readable(s_Final.candidate) && !*s_Final.candidate.dirty.value
+            && s_Final.generation_fresh.observed() && *s_Final.generation_fresh.value == s_Session.generation
+            && *s_Final.candidate.parent.value == s_Session.opening_parent
+            && s_Final.hero_entity_id.observed() && *s_Final.hero_entity_id.value == s_Session.hero_entity_id)
             s_FinalWorld = *s_Final.candidate.world.value;
 
-        SessionState& s_Session = *m_Session;
         const bool s_Clean = !s_Session.uncertain && s_FinalWorld.has_value();
 
         bool s_Sent = false;
@@ -1070,8 +1113,10 @@ namespace Motion
         s_Record.opening_parent = s_Session.opening_parent;
         if (s_FinalWorld)
             s_Record.final_world = *s_FinalWorld;
-        s_Record.restorable = s_Clean;
-        s_Record.invalidated = !s_Clean;
+        // Restorable only after a close BEAM can know (its ghost.closed queued): an unreported close is
+        // never restorable or releasable by BEAM, and so not natively either (verifier F6).
+        s_Record.restorable = s_Clean && s_Sent;
+        s_Record.invalidated = !s_Record.restorable;
 
         RelayLog::Info(
             "motion: session {} closed on frame {} ({}); clean {}; final world {}; received {} applied {} skipped {} refused {} uncertain {}; last applied {}; ghost.closed {}",

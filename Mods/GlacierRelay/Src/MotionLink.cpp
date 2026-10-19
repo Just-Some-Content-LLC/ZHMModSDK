@@ -101,6 +101,12 @@ MotionLink::Queued MotionLink::SendControl(uint64_t p_Serial, std::string p_Line
     return Queued::Queued;
 }
 
+size_t MotionLink::ControlRoom() const
+{
+    std::lock_guard s_Lock(m_Mutex);
+    return m_Binding.bound && m_Control.size() < k_ControlCapacity ? k_ControlCapacity - m_Control.size() : 0;
+}
+
 MotionLink::Queued MotionLink::SendSample(uint64_t p_Serial, std::string p_Line)
 {
     {
@@ -156,6 +162,12 @@ void MotionLink::Loop()
     uint32_t s_Backoff = m_Options.backoff_initial_ms;
     bool s_WaitBeforeConnect = false;
     bool s_LoggedWaiting = false;
+    uint64_t s_BoundAtMono = 0;   // when the current binding was made (0: none)
+    bool s_StableCounted = false;
+    {
+        std::lock_guard s_Lock(m_Mutex);
+        m_Stats.current_backoff_ms = s_Backoff;
+    }
 
     for (;;)
     {
@@ -195,12 +207,20 @@ void MotionLink::Loop()
                 if (WaitStop(s_Backoff))
                     break;
                 s_Backoff = std::min<uint32_t>(s_Backoff * 2, m_Options.backoff_max_ms);
+                {
+                    std::lock_guard s_Lock(m_Mutex);
+                    m_Stats.current_backoff_ms = s_Backoff;
+                }
                 continue; // re-read the command link before connecting
             }
 
             if (Connect() && Handshake(s_CommandGeneration))
             {
-                s_Backoff = m_Options.backoff_initial_ms;
+                // The backoff resets only once this binding stayed up for stable_ms (verifier F9; the
+                // command link's M5 N4 pacing): a binding BEAM refuses right after the attest is retried
+                // at a growing interval, never at a fixed one.
+                s_BoundAtMono = m_Clock();
+                s_StableCounted = false;
                 continue;
             }
 
@@ -239,6 +259,15 @@ void MotionLink::Loop()
             Disconnect(s_DropReason.empty() ? "dropped by the frame thread" : s_DropReason.c_str());
             s_WaitBeforeConnect = true;
             continue;
+        }
+
+        if (!s_StableCounted && s_BoundAtMono != 0 && m_Clock() - s_BoundAtMono >= m_Options.stable_ms)
+        {
+            s_StableCounted = true;
+            s_Backoff = m_Options.backoff_initial_ms;
+            std::lock_guard s_Lock(m_Mutex);
+            ++m_Stats.stable_bindings;
+            m_Stats.current_backoff_ms = s_Backoff;
         }
 
         if (!Flush() || !ReadLines(m_Options.poll_ms) || !Flush())
@@ -355,7 +384,13 @@ bool MotionLink::Handshake(uint64_t p_CommandGeneration)
         FD_ZERO(&s_Readable);
         FD_SET(AsSocket(m_Socket), &s_Readable);
         timeval s_Timeout = {0, 20000};
-        if (select(0, &s_Readable, nullptr, nullptr, &s_Timeout) <= 0)
+        const int s_Ready = select(0, &s_Readable, nullptr, nullptr, &s_Timeout);
+        if (s_Ready < 0)
+        {
+            RelayLog::Warn("motion link: select failed during the binding");
+            return false;
+        }
+        if (s_Ready == 0)
             continue;
 
         char s_Chunk[1024];
@@ -373,8 +408,10 @@ bool MotionLink::Handshake(uint64_t p_CommandGeneration)
         {
             if (m_Buffer.size() > MotionProtocol::k_MaxLineBytes)
             {
-                std::lock_guard s_Lock(m_Mutex);
-                ++m_Stats.violations;
+                {
+                    std::lock_guard s_Lock(m_Mutex);
+                    ++m_Stats.violations;
+                }
                 RelayLog::Warn("motion link: welcome line exceeds {} bytes", MotionProtocol::k_MaxLineBytes);
                 return false;
             }
@@ -387,25 +424,31 @@ bool MotionLink::Handshake(uint64_t p_CommandGeneration)
         const auto s_Decoded = MotionProtocol::DecodeFromBeam(s_Line);
         if (!s_Decoded.ok)
         {
-            std::lock_guard s_Lock(m_Mutex);
-            ++m_Stats.violations;
+            {
+                std::lock_guard s_Lock(m_Mutex);
+                ++m_Stats.violations;
+            }
             RelayLog::Warn("motion link: invalid line during the binding ({})", s_Decoded.error);
             return false;
         }
 
         if (s_Decoded.message.kind == MotionProtocol::Kind::Refused)
         {
-            std::lock_guard s_Lock(m_Mutex);
-            ++m_Stats.refusals;
-            m_Stats.last_refusal = s_Decoded.message.reason;
+            {
+                std::lock_guard s_Lock(m_Mutex);
+                ++m_Stats.refusals;
+                m_Stats.last_refusal = s_Decoded.message.reason;
+            }
             RelayLog::Warn("motion link: refused by BEAM ({})", s_Decoded.message.reason);
             return false;
         }
 
         if (s_Decoded.message.kind != MotionProtocol::Kind::Welcome)
         {
-            std::lock_guard s_Lock(m_Mutex);
-            ++m_Stats.violations;
+            {
+                std::lock_guard s_Lock(m_Mutex);
+                ++m_Stats.violations;
+            }
             RelayLog::Warn("motion link: {} before the binding; closing", MotionProtocol::KindText(s_Decoded.message.kind));
             return false;
         }
@@ -601,14 +644,17 @@ bool MotionLink::HandleLine(std::string_view p_Line)
     return true;
 }
 
-// Writes every queued control line, then every queued sample, each within the send deadline.
+// Writes at most k_FlushBurst queued lines — control first, then samples — each within the send deadline,
+// so a read (a close) is never stuck behind a long flush; a drop requested meanwhile stops the burst.
 bool MotionLink::Flush()
 {
-    for (;;)
+    for (size_t s_Written = 0; s_Written < k_FlushBurst; ++s_Written)
     {
         std::string s_Line;
         {
             std::lock_guard s_Lock(m_Mutex);
+            if (m_DropSerial != 0 && m_DropSerial == m_Binding.serial)
+                return true; // the loop disconnects on its next pass
             if (!m_Control.empty())
             {
                 s_Line = std::move(m_Control.front());
@@ -628,6 +674,7 @@ bool MotionLink::Flush()
         if (!SendLine(s_Line))
             return false;
     }
+    return true;
 }
 
 bool MotionLink::SendLine(const std::string& p_Line)
