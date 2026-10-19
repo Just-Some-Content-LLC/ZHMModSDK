@@ -191,6 +191,28 @@ namespace Attestation
         ));
     }
 
+    std::string MotionCanonicalInput(std::string_view p_Nonce, uint64_t p_MotionLinkGeneration, uint64_t p_CommandLinkGeneration, std::string_view p_AdapterInstanceId)
+    {
+        std::string s_Input("motion|");
+        s_Input += p_Nonce;
+        s_Input += '|';
+        s_Input += std::to_string(p_MotionLinkGeneration);
+        s_Input += '|';
+        s_Input += std::to_string(p_CommandLinkGeneration);
+        s_Input += '|';
+        s_Input += p_AdapterInstanceId;
+        return s_Input;
+    }
+
+    std::string MotionAttestMac(std::string_view p_Token, std::string_view p_Nonce, uint64_t p_MotionLinkGeneration, uint64_t p_CommandLinkGeneration, std::string_view p_AdapterInstanceId)
+    {
+        const std::string s_Input = MotionCanonicalInput(p_Nonce, p_MotionLinkGeneration, p_CommandLinkGeneration, p_AdapterInstanceId);
+        return Hex(HmacSha256(
+            reinterpret_cast<const uint8_t*>(p_Token.data()), p_Token.size(),
+            reinterpret_cast<const uint8_t*>(s_Input.data()), s_Input.size()
+        ));
+    }
+
     bool ValidNonce(std::string_view p_Text)
     {
         return LowerHex(p_Text, 32);

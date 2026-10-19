@@ -57,6 +57,8 @@ public:
         uint32_t stable_ms = 5000;     // a welcomed link counts as stable, resetting the backoff, after this long
         bool effectful = false; // [command] effectful: advertise and decode player.outfit.set/2
         std::string token;      // [command] token: 64 lowercase hex characters → protocol version 2; empty → version 1
+        bool motion = false;    // M7-B2 [motion] enabled (version 2 only): advertise and decode player.pose.share/1, and
+                                // with effectful also candidate.motion.session/1; false: the hello is exactly M6's
     };
 
     struct Stats
@@ -102,6 +104,11 @@ public:
 
     // The generation the current link holds (0 while not welcomed). Readable from any thread.
     uint64_t LinkGeneration() const;
+
+    // M7-B2: the generation of the current link when it speaks version 2 and has sent its attest over
+    // this welcome (0 otherwise): the only command link a motion link may name in its hello. Whether
+    // BEAM verified the attest is BEAM's to decide (it refuses the motion hello otherwise).
+    uint64_t AttestedGeneration() const;
 
     // The version this link speaks (1 or 2), fixed at construction.
     uint32_t ProtocolVersion() const { return m_Version; }

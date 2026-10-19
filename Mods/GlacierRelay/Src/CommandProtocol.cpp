@@ -62,12 +62,22 @@ namespace CommandProtocol
             return Entry::CandidateTransformSet1;
         if (p_Name == "candidate.transform.set" && p_Version == 2)
             return Entry::CandidateTransformSet2; // M6-G1: the (name, version) pair is the capability identity
+        if (p_Name == "player.pose.share" && p_Version == 1)
+            return Entry::PlayerPoseShare1; // M7-B2
+        if (p_Name == "candidate.motion.session" && p_Version == 1)
+            return Entry::CandidateMotionSession1; // M7-B2
         return Entry::Unknown;
     }
 
     bool IsEffectful(Entry p_Entry)
     {
-        return p_Entry == Entry::PlayerOutfitSet2 || p_Entry == Entry::CandidateTransformSet1 || p_Entry == Entry::CandidateTransformSet2;
+        return p_Entry == Entry::PlayerOutfitSet2 || p_Entry == Entry::CandidateTransformSet1 || p_Entry == Entry::CandidateTransformSet2
+            || p_Entry == Entry::CandidateMotionSession1;
+    }
+
+    const char* MotionSessionModeText(MotionSessionMode p_Mode)
+    {
+        return p_Mode == MotionSessionMode::Restore ? "restore" : "open";
     }
 
     const char* TransformModeText(TransformMode p_Mode)
@@ -411,6 +421,142 @@ namespace CommandProtocol
 
                 s_Command.transform = s_Request;
                 s_Command.params.emplace_back("mode", s_Mode->text);
+                break;
+            }
+
+            case Entry::PlayerPoseShare1:
+            {
+                // M7-B2: the share's operator statement as BEAM canonicalized it — mode "open", the
+                // share id, the bound motion link generation, the duration and the interval — and
+                // the mandatory mission_generation precondition; nothing else; and none of it unless
+                // the [motion] setting is on (otherwise rejected as not executable here).
+                if (!p_Options.motion)
+                    return Reject(s_Out, "motion setting disabled: player.pose.share/1 not executable");
+
+                if (!KnownKeys(*s_Params, {"mode", "share_id", "motion_link_generation", "duration_ms", "interval_ms"}, s_Unknown))
+                    return Reject(s_Out, "unknown parameter: " + s_Unknown);
+
+                MotionShareRequest s_Share;
+                const Value* s_Mode = s_Params->Find("mode");
+                if (!IsText(s_Mode, 16) || s_Mode->text != "open")
+                    return Reject(s_Out, "invalid parameter: mode (missing or not open)");
+                const Value* s_ShareId = s_Params->Find("share_id");
+                if (!IsText(s_ShareId, 36) || !ValidUuid(s_ShareId->text))
+                    return Reject(s_Out, "invalid parameter: share_id (missing or not a uuid)");
+                s_Share.share_id = s_ShareId->text;
+                if (!IsUnsigned(s_Params->Find("motion_link_generation"), s_Share.motion_link_generation) || s_Share.motion_link_generation == 0 || s_Share.motion_link_generation > k_MaxMotionLinkGeneration)
+                    return Reject(s_Out, "invalid parameter: motion_link_generation (missing or out of 1..2147483647)");
+                int32_t s_Duration = 0;
+                int32_t s_Interval = 0;
+                if (!IsBoundedInt(s_Params->Find("duration_ms"), static_cast<int32_t>(k_MinShareDurationMs), static_cast<int32_t>(k_MaxShareDurationMs), s_Duration))
+                    return Reject(s_Out, "invalid parameter: duration_ms (missing or out of 1000..300000)");
+                if (!IsBoundedInt(s_Params->Find("interval_ms"), static_cast<int32_t>(k_MinShareIntervalMs), static_cast<int32_t>(k_MaxShareIntervalMs), s_Interval))
+                    return Reject(s_Out, "invalid parameter: interval_ms (missing or out of 50..1000)");
+                s_Share.duration_ms = static_cast<uint32_t>(s_Duration);
+                s_Share.interval_ms = static_cast<uint32_t>(s_Interval);
+
+                if (!s_Command.mission_generation_precondition)
+                    return Reject(s_Out, "missing precondition: mission_generation");
+
+                s_Command.share = s_Share;
+                s_Command.params.emplace_back("mode", "open");
+                s_Command.params.emplace_back("share_id", s_Share.share_id);
+                break;
+            }
+
+            case Entry::CandidateMotionSession1:
+            {
+                // M7-B2: mode "open" — the session id, the bound motion link generation, the exact
+                // expectation groups and parent of a recent exact inspection and EVERY limit (BEAM's
+                // canonical open carries all six); mode "restore" — the session id, the expectation
+                // groups of a fresh later inspection, the session's opening preimage as target_world
+                // and the session open's command id as restore_of, and no limit or link generation;
+                // the mandatory mission_generation precondition; none of it unless both the [motion]
+                // and the [command] effectful settings are on.
+                if (!p_Options.motion || !p_Options.effectful)
+                    return Reject(s_Out, "motion or effectful setting disabled: candidate.motion.session/1 not executable");
+
+                if (!KnownKeys(*s_Params, {"mode", "session_id", "motion_link_generation", "expect_world", "expect_local", "expect_parent", "duration_ms", "half_extent_mm", "max_speed_mmps", "credit_ms", "min_apply_interval_ms", "silence_close_ms", "target_world", "restore_of"}, s_Unknown))
+                    return Reject(s_Out, "unknown parameter: " + s_Unknown);
+
+                MotionSessionRequest s_Request;
+                std::string s_Why;
+                const Value* s_Mode = s_Params->Find("mode");
+                if (!IsText(s_Mode, 16) || (s_Mode->text != "open" && s_Mode->text != "restore"))
+                    return Reject(s_Out, "invalid parameter: mode (missing or not open|restore)");
+                s_Request.mode = s_Mode->text == "restore" ? MotionSessionMode::Restore : MotionSessionMode::Open;
+
+                const Value* s_SessionId = s_Params->Find("session_id");
+                if (!IsText(s_SessionId, 36) || !ValidUuid(s_SessionId->text))
+                    return Reject(s_Out, "invalid parameter: session_id (missing or not a uuid)");
+                s_Request.session_id = s_SessionId->text;
+
+                const Value* s_ExpectWorld = s_Params->Find("expect_world");
+                if (!IsText(s_ExpectWorld, k_MaxObservedTextBytes) || !FloatWords::Decode(s_ExpectWorld->text, s_Request.expect_world, s_Why))
+                    return Reject(s_Out, "invalid parameter: expect_world (" + (s_Why.empty() ? std::string("missing") : s_Why) + ")");
+                const Value* s_ExpectLocal = s_Params->Find("expect_local");
+                if (!IsText(s_ExpectLocal, k_MaxObservedTextBytes) || !FloatWords::Decode(s_ExpectLocal->text, s_Request.expect_local, s_Why))
+                    return Reject(s_Out, "invalid parameter: expect_local (" + (s_Why.empty() ? std::string("missing") : s_Why) + ")");
+                const Value* s_ExpectParent = s_Params->Find("expect_parent");
+                if (!IsText(s_ExpectParent, 16) || !(ValidHex16(s_ExpectParent->text) || s_ExpectParent->text == "none"))
+                    return Reject(s_Out, "invalid parameter: expect_parent (missing, or not 16 lowercase hex digits or none)");
+                s_Request.expect_parent = s_ExpectParent->text;
+
+                const char* k_Limits[] = {"duration_ms", "half_extent_mm", "max_speed_mmps", "credit_ms", "min_apply_interval_ms", "silence_close_ms"};
+                const Value* s_Generation = s_Params->Find("motion_link_generation");
+                const Value* s_TargetWorld = s_Params->Find("target_world");
+                const Value* s_RestoreOf = s_Params->Find("restore_of");
+
+                if (s_Request.mode == MotionSessionMode::Open)
+                {
+                    if (s_TargetWorld || s_RestoreOf)
+                        return Reject(s_Out, "invalid parameter: an open carries no target_world or restore_of");
+                    uint64_t s_Mlg = 0;
+                    if (!IsUnsigned(s_Generation, s_Mlg) || s_Mlg == 0 || s_Mlg > k_MaxMotionLinkGeneration)
+                        return Reject(s_Out, "invalid parameter: motion_link_generation (an open names it; 1..2147483647)");
+                    s_Request.motion_link_generation = s_Mlg;
+
+                    struct Bound { const char* name; int32_t min; int32_t max; uint32_t* out; };
+                    const Bound s_Bounds[] = {
+                        {"duration_ms", 1000, 300000, &s_Request.limits.duration_ms},
+                        {"half_extent_mm", 100, 8000, &s_Request.limits.half_extent_mm},
+                        {"max_speed_mmps", 100, 3000, &s_Request.limits.max_speed_mmps},
+                        {"credit_ms", 50, 200, &s_Request.limits.credit_ms},
+                        {"min_apply_interval_ms", 40, 1000, &s_Request.limits.min_apply_interval_ms},
+                        {"silence_close_ms", 250, 2000, &s_Request.limits.silence_close_ms},
+                    };
+                    for (const auto& s_Bound : s_Bounds)
+                    {
+                        int32_t s_Value = 0;
+                        if (!IsBoundedInt(s_Params->Find(s_Bound.name), s_Bound.min, s_Bound.max, s_Value))
+                            return Reject(s_Out, fmt::format("invalid parameter: {} (an open carries every limit; {}..{})", s_Bound.name, s_Bound.min, s_Bound.max));
+                        *s_Bound.out = static_cast<uint32_t>(s_Value);
+                    }
+                }
+                else
+                {
+                    if (s_Generation)
+                        return Reject(s_Out, "invalid parameter: a restore carries no motion_link_generation");
+                    for (const char* s_Limit : k_Limits)
+                        if (s_Params->Find(s_Limit))
+                            return Reject(s_Out, std::string("invalid parameter: a restore carries no limit (") + s_Limit + ")");
+                    FloatWords::Words12 s_Target;
+                    if (!IsText(s_TargetWorld, k_MaxObservedTextBytes) || !FloatWords::Decode(s_TargetWorld->text, s_Target, s_Why))
+                        return Reject(s_Out, "invalid parameter: target_world (" + (s_Why.empty() ? std::string("missing") : s_Why) + ")");
+                    if (!IsText(s_RestoreOf, 36) || !ValidUuid(s_RestoreOf->text))
+                        return Reject(s_Out, "invalid parameter: restore_of (missing or not a uuid)");
+                    if (s_Target == s_Request.expect_world)
+                        return Reject(s_Out, "target_world equals expect_world: already at the restore target; a no-op is not an effectful command");
+                    s_Request.target_world = s_Target;
+                    s_Request.restore_of = s_RestoreOf->text;
+                }
+
+                if (!s_Command.mission_generation_precondition)
+                    return Reject(s_Out, "missing precondition: mission_generation");
+
+                s_Command.motion = s_Request;
+                s_Command.params.emplace_back("mode", s_Mode->text);
+                s_Command.params.emplace_back("session_id", s_Request.session_id);
                 break;
             }
 

@@ -30,6 +30,14 @@ namespace Attestation
     std::string CanonicalInput(std::string_view p_Nonce, uint64_t p_LinkGeneration, std::string_view p_AdapterInstanceId);
     std::string AttestMac(std::string_view p_Token, std::string_view p_Nonce, uint64_t p_LinkGeneration, std::string_view p_AdapterInstanceId);
 
+    // M7-B2: the motion link's attestation (glacier-relay Command.Schema.motion_attest_mac/5; M7
+    // design section 15.5). The canonical input is
+    // "motion|<nonce>|<motion_link_generation>|<command_link_generation>|<adapter_instance_id>": the
+    // "motion|" prefix separates it from the command link's input, so neither MAC answers the other's
+    // challenge. Same key, same HMAC-SHA256, same lowercase hex; never logged.
+    std::string MotionCanonicalInput(std::string_view p_Nonce, uint64_t p_MotionLinkGeneration, uint64_t p_CommandLinkGeneration, std::string_view p_AdapterInstanceId);
+    std::string MotionAttestMac(std::string_view p_Token, std::string_view p_Nonce, uint64_t p_MotionLinkGeneration, uint64_t p_CommandLinkGeneration, std::string_view p_AdapterInstanceId);
+
     // Shapes the protocol accepts: a nonce is 32 lowercase hex characters, a token 64.
     bool ValidNonce(std::string_view p_Text);
     bool ValidToken(std::string_view p_Text);

@@ -111,6 +111,8 @@ namespace CommandProtocol
         RelayInspectCandidateTransform1,
         CandidateTransformSet1,
         CandidateTransformSet2,
+        PlayerPoseShare1,          // M7-B2: inert; decodable only with the [motion] setting on
+        CandidateMotionSession1,   // M7-B2: effectful; decodable only with [motion] and [command] effectful on
     };
 
     // candidate.transform.set v1 (M6-F; design section 12.5) and v2 (M6-G1; glacier-relay
@@ -139,6 +141,57 @@ namespace CommandProtocol
         std::optional<FloatWords::Words12> target_world;    // restore only
         std::optional<std::string> restore_of;              // restore only: the original lift's command id
     };
+
+    // M7-B2 (glacier-relay docs/design/M7_NETWORK_GHOST.md sections 15.4, 15.5 and 17): the two
+    // motion-gated entries, with BEAM's Command.Schema bounds exactly. player.pose.share v1 opens
+    // the read-only sampling of the local hero onto the bound motion link; candidate.motion.session
+    // v1 opens a bounded destination session on the compiled candidate ("open", with every limit)
+    // or restores a closed one to its opening preimage ("restore", bound to the session's open).
+    // Close is not a command: it travels on the motion link.
+    constexpr uint32_t k_MinShareDurationMs = 1000;
+    constexpr uint32_t k_MaxShareDurationMs = 300000;
+    constexpr uint32_t k_MinShareIntervalMs = 50;
+    constexpr uint32_t k_MaxShareIntervalMs = 1000;
+    constexpr uint64_t k_MaxMotionLinkGeneration = 2147483647;
+
+    struct MotionShareRequest
+    {
+        std::string share_id;
+        uint64_t motion_link_generation = 0;
+        uint32_t duration_ms = 0;
+        uint32_t interval_ms = 0;
+    };
+
+    enum class MotionSessionMode
+    {
+        Open,
+        Restore,
+    };
+
+    struct MotionLimits
+    {
+        uint32_t duration_ms = 0;           // 1,000 .. 300,000
+        uint32_t half_extent_mm = 0;        // 100 .. 8,000
+        uint32_t max_speed_mmps = 0;        // 100 .. 3,000
+        uint32_t credit_ms = 0;             // 50 .. 200
+        uint32_t min_apply_interval_ms = 0; // 40 .. 1,000
+        uint32_t silence_close_ms = 0;      // 250 .. 2,000
+    };
+
+    struct MotionSessionRequest
+    {
+        MotionSessionMode mode = MotionSessionMode::Open;
+        std::string session_id;
+        std::optional<uint64_t> motion_link_generation; // open only (required)
+        FloatWords::Words12 expect_world;
+        FloatWords::Words7 expect_local;
+        std::string expect_parent;                      // 16 lowercase hex, or "none"
+        MotionLimits limits;                            // open only (every limit required)
+        std::optional<FloatWords::Words12> target_world; // restore only: the session's opening preimage
+        std::optional<std::string> restore_of;          // restore only: the session open's command id
+    };
+
+    const char* MotionSessionModeText(MotionSessionMode p_Mode);
 
     Entry Lookup(std::string_view p_Name, uint32_t p_Version);
     bool IsEffectful(Entry p_Entry);
@@ -180,6 +233,10 @@ namespace CommandProtocol
 
         // candidate.transform.set v1 only (M6-F).
         std::optional<TransformRequest> transform;
+
+        // M7-B2: player.pose.share v1 / candidate.motion.session v1 only.
+        std::optional<MotionShareRequest> share;
+        std::optional<MotionSessionRequest> motion;
     };
 
     struct DecodedCommand
@@ -199,6 +256,7 @@ namespace CommandProtocol
     {
         uint32_t protocol_version = k_ProtocolVersion;
         bool effectful = false;
+        bool motion = false; // M7-B2: the [motion] enabled setting (the session entry also needs effectful)
     };
 
     // Decodes one line (no trailing newline) BEAM sent. A command that decodes but names an

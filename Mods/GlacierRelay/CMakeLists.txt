@@ -35,6 +35,8 @@ set(RELAY_ENGINE_INDEPENDENT_SOURCES
         Src/LogRelaySink.h
         Src/MissionObserver.cpp
         Src/MissionObserver.h
+        Src/MotionProtocol.cpp
+        Src/MotionProtocol.h
         Src/OutfitApply.cpp
         Src/OutfitApply.h
         Src/OutfitObservation.cpp

@@ -50,6 +50,8 @@ CommandLink::CommandLink(Options p_Options, CommandQueue& p_Queue, std::string p
     m_Version = m_Options.token.empty() ? static_cast<uint32_t>(CommandProtocol::k_ProtocolVersion) : static_cast<uint32_t>(CommandProtocol::k_ProtocolVersion2);
     m_Stats.protocol_version = m_Version;
     m_Stats.effectful = m_Options.effectful;
+    if (m_Options.motion && m_Version != static_cast<uint32_t>(CommandProtocol::k_ProtocolVersion2))
+        RelayLog::Warn("command link: the motion setting needs a run token (protocol version 2); the motion entries are not advertised");
 
     WSADATA s_Data;
 
@@ -109,6 +111,12 @@ uint64_t CommandLink::LinkGeneration() const
 {
     std::lock_guard s_Lock(m_Mutex);
     return m_Stats.welcomed ? m_Stats.link_generation : 0;
+}
+
+uint64_t CommandLink::AttestedGeneration() const
+{
+    std::lock_guard s_Lock(m_Mutex);
+    return m_Stats.welcomed && m_Version == static_cast<uint32_t>(CommandProtocol::k_ProtocolVersion2) ? m_Stats.link_generation : 0;
 }
 
 CommandLink::Stats CommandLink::GetStats() const
@@ -331,6 +339,14 @@ bool CommandLink::Handshake()
         s_Hello.capabilities.push_back("player.outfit.set/2");
         s_Hello.capabilities.push_back("candidate.transform.set/1"); // M6-F
         s_Hello.capabilities.push_back("candidate.transform.set/2"); // M6-G1 (step_y | restore)
+    }
+    // M7-B2: the motion entries only on a version-2 link with the [motion] setting on; the session
+    // entry also needs the effectful setting. With motion off the hello is exactly M6's.
+    if (m_Options.motion && m_Version == static_cast<uint32_t>(CommandProtocol::k_ProtocolVersion2))
+    {
+        s_Hello.capabilities.push_back("player.pose.share/1");
+        if (m_Options.effectful)
+            s_Hello.capabilities.push_back("candidate.motion.session/1");
     }
 
     {
@@ -567,6 +583,7 @@ void CommandLink::HandleLine(std::string_view p_Line)
     CommandProtocol::DecodeOptions s_Options;
     s_Options.protocol_version = m_Version;
     s_Options.effectful = m_Options.effectful;
+    s_Options.motion = m_Options.motion && m_Version == static_cast<uint32_t>(CommandProtocol::k_ProtocolVersion2);
     const auto s_Decoded = CommandProtocol::DecodeCommand(p_Line, s_Options);
 
     Result s_Result;
